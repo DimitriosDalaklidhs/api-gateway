@@ -1,6 +1,6 @@
 #  API Gateway ⚡
 
-A high-performance, production-ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
+A high-performance, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
 
 ```
  Clients
@@ -305,4 +305,4 @@ CLOSED ──────────────────────► OPE
            └──────────────────────► OPEN
 ```
 
-State is stored in Redis so all gateway replicas share it — no split-brain.
+State is stored in Redis so all gateway replicas share it, so there is no split-brain.
