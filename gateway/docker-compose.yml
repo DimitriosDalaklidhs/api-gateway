@@ -1,0 +1,65 @@
+version: "3.9"
+
+services:
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET_KEY: "change-me-in-production-please"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/admin/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Mock downstream service ────────────────────────────────────────────────
+  mock-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8010/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Redis Insight (optional GUI) ───────────────────────────────────────────
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    depends_on:
+      - redis
+    profiles:
+      - debug
