@@ -306,3 +306,7 @@ CLOSED ──────────────────────► OPE
 ```
 
 State is stored in Redis so all gateway replicas share it, so there is no split-brain.
+## Author
+
+**Dimitrios Dalaklidis**  
+[LinkedIn](https://www.linkedin.com/in/dimitris-dalaklidis-a72838397/) · [GitHub](https://github.com/DimitriosDalaklidhs)
