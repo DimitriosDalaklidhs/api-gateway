@@ -2,6 +2,8 @@
 
 A high-performance, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
 
+![CI](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/main.yml/badge.svg)
+
 ```
  Clients
     │
@@ -83,6 +85,14 @@ gateway/
 └── tests/
     └── test_gateway.py        # 18 unit + integration tests (all passing)
 ```
+
+---
+
+## Prerequisites
+
+- **Docker & Docker Compose** — for running the full stack
+- **Python 3.11+** — for local development
+- **Redis 7+** — provided via Docker Compose, or run separately
 
 ---
 
@@ -249,8 +259,11 @@ Every proxied response includes:
 
 ## Running Tests
 
+Tests use an in-memory Redis mock — no external infrastructure required.
+
 ```bash
-pytest tests/ -v --asyncio-mode=auto
+cd gateway
+PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
 ```
 
 ```
@@ -263,6 +276,21 @@ Test coverage:
 - Proxy: 200 forward, timeout retry, 502 exhaustion
 - Auth: token create/decode, invalid token rejection
 - Integration: health, token endpoint, 404 for unknown routes
+
+---
+
+## CI/CD
+
+This project uses **GitHub Actions** for continuous integration.
+
+On every push to `main` or `dev`, and on every pull request, the pipeline automatically:
+
+1. Spins up a Redis 7 service container
+2. Installs all dependencies
+3. Lints with **ruff**
+4. Runs all 18 tests with **pytest**
+
+Workflow file: [`.github/workflows/main.yml`](.github/workflows/main.yml)
 
 ---
 
@@ -305,7 +333,10 @@ CLOSED ──────────────────────► OPE
            └──────────────────────► OPEN
 ```
 
-State is stored in Redis so all gateway replicas share it, so there is no split-brain.
+State is stored in Redis so all gateway replicas share it — no split-brain across replicas.
+
+---
+
 ## Author
 
 **Dimitrios Dalaklidis**  
