@@ -47,4 +47,4 @@ jobs:
           JWT_SECRET_KEY: ci-test-secret
         run: |
           cd gateway
-          pytest tests/ -v --asyncio-mode=auto
+          PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
