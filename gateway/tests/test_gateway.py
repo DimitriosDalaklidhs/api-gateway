@@ -493,6 +493,7 @@ class TestIntegration:
             return r
 
         app.dependency_overrides[get_redis] = override_redis
-        resp = client.get("/nonexistent-path-xyz")
-        assert resp.status_code == 404
-        app.dependency_overrides.clear()
+with TestClient(app, raise_server_exceptions=False) as client:
+    resp = client.get("/nonexistent-path-xyz")
+assert resp.status_code == 404
+app.dependency_overrides.clear()
