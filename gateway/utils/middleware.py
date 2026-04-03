@@ -53,7 +53,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         try:
             response: Response = await call_next(request)
-        except Exception as exc:
+        except Exception:
             latency_ms = (time.perf_counter() - start) * 1000
             logger.error(
                 "Unhandled exception",
