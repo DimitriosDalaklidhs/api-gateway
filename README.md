@@ -91,15 +91,15 @@ gateway/
 
 ## Prerequisites
 
-- **Docker & Docker Compose** — for running the full stack
-- **Python 3.11+** — for local development
-- **Redis 7+** — provided via Docker Compose, or run separately
+- **Docker & Docker Compose** : for running the full stack
+- **Python 3.11+** : for local development
+- **Redis 7+** : provided via Docker Compose, or run separately
 
 ---
 
 ## Quick Start
 
-### Option A — Docker Compose (recommended)
+### Option A : Docker Compose (recommended)
 
 ```bash
 docker compose up --build
@@ -110,7 +110,7 @@ Services:
 - Mock service → http://localhost:8010
 - Redis → localhost:6379
 
-### Option B — Local dev
+### Option B : Local dev
 
 ```bash
 # 1. Start Redis
@@ -260,7 +260,7 @@ Every proxied response includes:
 
 ## Running Tests
 
-Tests use an in-memory Redis mock — no external infrastructure required.
+Tests use an in memory Redis mock, no external infrastructure required.
 
 ```bash
 cd gateway
@@ -284,7 +284,7 @@ Test coverage:
 
 This project uses **GitHub Actions** for a full CI/CD pipeline.
 
-### CI — Continuous Integration
+### CI : Continuous Integration
 
 Triggers on every push to `main` or `dev`, and on every pull request. Completes in under 25 seconds.
 
@@ -295,7 +295,7 @@ Triggers on every push to `main` or `dev`, and on every pull request. Completes 
 
 Workflow: [`.github/workflows/main.yml`](.github/workflows/main.yml)
 
-### CD — Continuous Deployment
+### CD : Continuous Deployment
 
 Triggers automatically after CI passes on `main`. Deploys to AWS in about 1 minute.
 
@@ -309,10 +309,10 @@ Workflow: [`.github/workflows/cd.yml`](.github/workflows/cd.yml)
 
 | Component | Details |
 |---|---|
-| Compute | AWS EC2 t3.micro — Ubuntu 24.04 (`eu-north-1`) |
-| Container registry | AWS ECR — single repo, two tags (`:gateway`, `:mock`) |
-| Orchestration | `docker-compose` — Redis + Gateway + Mock service |
-| Secrets | GitHub Actions secrets — AWS keys, SSH key, ECR URI |
+| Compute | AWS EC2 t3.micro : Ubuntu 24.04 (`eu-north-1`) |
+| Container registry | AWS ECR : single repo, two tags (`:gateway`, `:mock`) |
+| Orchestration | `docker-compose` : Redis + Gateway + Mock service |
+| Secrets | GitHub Actions secrets : AWS keys, SSH key, ECR URI |
 | Cost protection | AWS Budget alert at $0.01 + CloudWatch alarm auto-stops instance on sustained high CPU |
 
 ---
@@ -356,7 +356,7 @@ CLOSED ──────────────────────► OPE
            └──────────────────────► OPEN
 ```
 
-State is stored in Redis so all gateway replicas share it — no split-brain across replicas.
+State is stored in Redis so all gateway replicas share it, no split brain across replicas.
 
 ---
 
