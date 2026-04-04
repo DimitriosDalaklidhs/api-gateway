@@ -1,6 +1,6 @@
 #  API Gateway ⚡
-
-A high-performance, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
+My proudest work so far!
+CI/CD INCLUDED, high performing, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
 
 ![CI](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/main.yml/badge.svg)
 ![CD](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/cd.yml/badge.svg)
