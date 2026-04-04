@@ -157,7 +157,7 @@ rate_limiting:
 circuit_breaker:
   failure_threshold: 5         # consecutive failures before OPEN
   recovery_timeout_seconds: 30 # time in OPEN before trying HALF-OPEN
-  half_open_max_calls: 3       # probe calls allowed in HALF-OPEN
+  half_open_max_calls: 3       # probe calls are allowed in HALF-OPEN
 ```
 
 ### Environment variable overrides
