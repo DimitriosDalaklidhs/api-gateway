@@ -3,6 +3,7 @@
 A high-performance, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
 
 ![CI](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/main.yml/badge.svg)
+![CD](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/cd.yml/badge.svg)
 
 ```
  Clients
@@ -157,7 +158,7 @@ rate_limiting:
 circuit_breaker:
   failure_threshold: 5         # consecutive failures before OPEN
   recovery_timeout_seconds: 30 # time in OPEN before trying HALF-OPEN
-  half_open_max_calls: 3       # probe calls are allowed in HALF-OPEN
+  half_open_max_calls: 3       # probe calls allowed in HALF-OPEN
 ```
 
 ### Environment variable overrides
@@ -281,16 +282,38 @@ Test coverage:
 
 ## CI/CD
 
-This project uses **GitHub Actions** for continuous integration.
+This project uses **GitHub Actions** for a full CI/CD pipeline.
 
-On every push to `main` or `dev`, and on every pull request, the pipeline automatically:
+### CI — Continuous Integration
 
-1. Spins up a Redis 7 service container
+Triggers on every push to `main` or `dev`, and on every pull request. Completes in under 25 seconds.
+
+1. Spins up a **Redis 7** service container
 2. Installs all dependencies
 3. Lints with **ruff**
 4. Runs all 18 tests with **pytest**
 
-Workflow file: [`.github/workflows/main.yml`](.github/workflows/main.yml)
+Workflow: [`.github/workflows/main.yml`](.github/workflows/main.yml)
+
+### CD — Continuous Deployment
+
+Triggers automatically after CI passes on `main`. Deploys to AWS in about 1 minute.
+
+1. Builds the gateway Docker image → pushes to **AWS ECR** (tag: `:gateway`)
+2. Builds the mock service image → pushes to **AWS ECR** (tag: `:mock`)
+3. SSHs into EC2, pulls the new images, restarts the stack via `docker-compose`
+
+Workflow: [`.github/workflows/cd.yml`](.github/workflows/cd.yml)
+
+### Infrastructure
+
+| Component | Details |
+|---|---|
+| Compute | AWS EC2 t3.micro — Ubuntu 24.04 (`eu-north-1`) |
+| Container registry | AWS ECR — single repo, two tags (`:gateway`, `:mock`) |
+| Orchestration | `docker-compose` — Redis + Gateway + Mock service |
+| Secrets | GitHub Actions secrets — AWS keys, SSH key, ECR URI |
+| Cost protection | AWS Budget alert at $0.01 + CloudWatch alarm auto-stops instance on sustained high CPU |
 
 ---
 
