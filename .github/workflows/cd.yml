@@ -1,0 +1,115 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: ["main"]
+    types:
+      - completed
+
+jobs:
+  deploy:
+    name: Build, Push & Deploy
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push gateway image
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+        run: |
+          docker build -t $REGISTRY/api-gateway:gateway -f gateway/Dockerfile gateway/
+          docker push $REGISTRY/api-gateway:gateway
+
+      - name: Build & push mock-service image
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+        run: |
+          docker build -t $REGISTRY/api-gateway:mock -f gateway/Dockerfile.mock gateway/
+          docker push $REGISTRY/api-gateway:mock
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          REGION: ${{ secrets.AWS_REGION }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: REGISTRY,REGION
+          script: |
+            # Log in to ECR from the EC2 instance
+            aws ecr get-login-password --region $REGION | \
+              docker login --username AWS --password-stdin $REGISTRY
+
+            # Pull latest images
+            docker pull $REGISTRY/api-gateway:gateway
+            docker pull $REGISTRY/api-gateway:mock
+
+            # Write docker-compose.yml using ECR images
+            mkdir -p ~/api-gateway
+            cat > ~/api-gateway/docker-compose.yml << EOF
+            version: "3.9"
+            services:
+              redis:
+                image: redis:7-alpine
+                restart: unless-stopped
+                ports:
+                  - "6379:6379"
+                command: redis-server --save "" --loglevel warning
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 5s
+                  timeout: 3s
+                  retries: 5
+
+              gateway:
+                image: $REGISTRY/api-gateway:gateway
+                restart: unless-stopped
+                ports:
+                  - "8000:8000"
+                environment:
+                  REDIS_HOST: redis
+                  REDIS_PORT: 6379
+                  JWT_SECRET_KEY: "change-me-in-production-please"
+                depends_on:
+                  redis:
+                    condition: service_healthy
+                healthcheck:
+                  test: ["CMD", "curl", "-sf", "http://localhost:8000/admin/health"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
+              mock-service:
+                image: $REGISTRY/api-gateway:mock
+                restart: unless-stopped
+                ports:
+                  - "8010:8010"
+                healthcheck:
+                  test: ["CMD", "curl", "-sf", "http://localhost:8010/health"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 3
+            EOF
+
+            # Restart stack with new images
+            cd ~/api-gateway
+            docker-compose down
+            docker-compose up -d
+            docker-compose ps
