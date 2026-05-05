@@ -1,53 +1,51 @@
-#  API Gateway ⚡
-My proudest work so far!
-CI/CD INCLUDED, high performing, production ready API Gateway built with **FastAPI**, **httpx**, and **Redis**.
+# API Gateway ⚡
 
-![CI](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/main.yml/badge.svg)
-![CD](https://github.com/DimitriosDalaklidhs/api-gateway/actions/workflows/cd.yml/badge.svg)
+My proudest work so far! CI/CD INCLUDED, high performing, production ready API Gateway built with FastAPI, httpx, and Redis.
 
+CI CD
+
+```mermaid
+flowchart TB
+    Clients([Clients])
+
+    subgraph Gateway["API Gateway :8000"]
+        direction TB
+        LM[Logging Middleware]
+        RL[Rate Limiter<br/>Redis sliding-window]
+        CB[Circuit Breaker]
+        PR[Proxy + Retry<br/>httpx, backoff]
+        CA[Cache<br/>Redis]
+        JWT[JWT Auth]
+    end
+
+    Redis[(Redis)]
+    US[user-service :8001]
+    OS[order-service :8002]
+    XS[other-service]
+
+    Clients --> Gateway
+    RL -.-> Redis
+    CB -.-> Redis
+    CA -.-> Redis
+    Gateway --> US
+    Gateway --> OS
+    Gateway --> XS
 ```
- Clients
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│            API Gateway :8000            │
-│  ┌──────────┐  ┌──────────────────────┐ │
-│  │ Logging  │  │   Rate Limiter       │ │
-│  │Middleware│  │ (Redis sliding-win)  │ │
-│  └──────────┘  └──────────────────────┘ │
-│  ┌──────────┐  ┌──────────────────────┐ │
-│  │  Circuit │  │   Proxy + Retry      │ │
-│  │ Breaker  │  │ (httpx, backoff)     │ │
-│  └──────────┘  └──────────────────────┘ │
-│  ┌──────────┐  ┌──────────────────────┐ │
-│  │   Cache  │  │    JWT Auth          │ │
-│  │ (Redis)  │  │                      │ │
-│  └──────────┘  └──────────────────────┘ │
-└─────────────────────────────────────────┘
-    │              │              │
-    ▼              ▼              ▼
-user-service   order-service  other-service
-  :8001           :8002
-```
-
----
 
 ## Features
 
 | Phase | Feature | Details |
 |-------|---------|---------|
-| 1 | **Dynamic Proxy** | Routes by path prefix; supports GET/POST/PUT/DELETE/PATCH |
-| 2 | **Logging Middleware** | JSON-structured logs to stdout + rotating file |
-| 3 | **Rate Limiting** | Redis sliding-window counter; per-IP, per-route limits; temp bans |
-| 4 | **Retries** | Exponential backoff; configurable retry-on status codes |
-| 5 | **Circuit Breaker** | CLOSED → OPEN → HALF-OPEN; shared state via Redis |
-| 6 | **Config System** | YAML file + environment variable overrides |
-| ★ | **JWT Auth** | Bearer token validation; optional per-route |
-| ★ | **Response Cache** | Redis GET cache; TTL configurable; admin invalidation |
-| ★ | **Admin API** | `/admin/*` control plane for live inspection & control |
-| ★ | **Mock Service** | Built-in downstream simulator with failure injection |
-
----
+| 1 | Dynamic Proxy | Routes by path prefix; supports GET/POST/PUT/DELETE/PATCH |
+| 2 | Logging Middleware | JSON-structured logs to stdout + rotating file |
+| 3 | Rate Limiting | Redis sliding-window counter; per-IP, per-route limits; temp bans |
+| 4 | Retries | Exponential backoff; configurable retry-on status codes |
+| 5 | Circuit Breaker | CLOSED → OPEN → HALF-OPEN; shared state via Redis |
+| 6 | Config System | YAML file + environment variable overrides |
+| ★ | JWT Auth | Bearer token validation; optional per-route |
+| ★ | Response Cache | Redis GET cache; TTL configurable; admin invalidation |
+| ★ | Admin API | /admin/* control plane for live inspection & control |
+| ★ | Mock Service | Built-in downstream simulator with failure injection |
 
 ## Project Structure
 
@@ -87,15 +85,11 @@ gateway/
     └── test_gateway.py        # 18 unit + integration tests (all passing)
 ```
 
----
-
 ## Prerequisites
 
 - **Docker & Docker Compose** : for running the full stack
 - **Python 3.11+** : for local development
 - **Redis 7+** : provided via Docker Compose, or run separately
-
----
 
 ## Quick Start
 
@@ -106,6 +100,7 @@ docker compose up --build
 ```
 
 Services:
+
 - Gateway → http://localhost:8000
 - Mock service → http://localhost:8010
 - Redis → localhost:6379
@@ -126,9 +121,7 @@ uvicorn mock_service:app --port 8010 &
 cd gateway && uvicorn main:app --port 8000 --reload
 ```
 
----
-
-## Configuration (`config.yaml`)
+## Configuration (config.yaml)
 
 ### Adding a route
 
@@ -168,8 +161,6 @@ circuit_breaker:
 | `REDIS_HOST` | Redis hostname |
 | `REDIS_PORT` | Redis port |
 | `JWT_SECRET_KEY` | Secret for JWT signing |
-
----
 
 ## API Reference
 
@@ -242,8 +233,6 @@ watch -n1 'curl -s http://localhost:8000/admin/circuit-breakers | python3 -m jso
 curl -X POST "http://localhost:8010/mock/failure-mode?enabled=false"
 ```
 
----
-
 ## Response Headers
 
 Every proxied response includes:
@@ -255,8 +244,6 @@ Every proxied response includes:
 | `X-RateLimit-Remaining` | Requests left in the current window |
 | `X-Response-Time-Ms` | Total gateway latency in milliseconds |
 | `X-Cache` | `HIT` when served from Redis cache |
-
----
 
 ## Running Tests
 
@@ -272,50 +259,47 @@ PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
 ```
 
 Test coverage:
+
 - Rate limiter: allow, block, ban, reset
 - Circuit breaker: all 3 state transitions
 - Proxy: 200 forward, timeout retry, 502 exhaustion
 - Auth: token create/decode, invalid token rejection
 - Integration: health, token endpoint, 404 for unknown routes
 
----
-
 ## CI/CD
 
-This project uses **GitHub Actions** for a full CI/CD pipeline.
+This project uses GitHub Actions for a full CI/CD pipeline.
 
 ### CI : Continuous Integration
 
 Triggers on every push to `main` or `dev`, and on every pull request. Completes in under 25 seconds.
 
-1. Spins up a **Redis 7** service container
-2. Installs all dependencies
-3. Lints with **ruff**
-4. Runs all 18 tests with **pytest**
+- Spins up a Redis 7 service container
+- Installs all dependencies
+- Lints with `ruff`
+- Runs all 18 tests with `pytest`
 
-Workflow: [`.github/workflows/main.yml`](.github/workflows/main.yml)
+Workflow: `.github/workflows/main.yml`
 
 ### CD : Continuous Deployment
 
 Triggers automatically after CI passes on `main`. Deploys to AWS in about 1 minute.
 
-1. Builds the gateway Docker image → pushes to **AWS ECR** (tag: `:gateway`)
-2. Builds the mock service image → pushes to **AWS ECR** (tag: `:mock`)
-3. SSHs into EC2, pulls the new images, restarts the stack via `docker-compose`
+- Builds the gateway Docker image → pushes to AWS ECR (tag: `:gateway`)
+- Builds the mock service image → pushes to AWS ECR (tag: `:mock`)
+- SSHs into EC2, pulls the new images, restarts the stack via `docker-compose`
 
-Workflow: [`.github/workflows/cd.yml`](.github/workflows/cd.yml)
+Workflow: `.github/workflows/cd.yml`
 
 ### Infrastructure
 
 | Component | Details |
-|---|---|
-| Compute | AWS EC2 t3.micro : Ubuntu 24.04 (`eu-north-1`) |
+|-----------|---------|
+| Compute | AWS EC2 `t3.micro` : Ubuntu 24.04 (eu-north-1) |
 | Container registry | AWS ECR : single repo, two tags (`:gateway`, `:mock`) |
 | Orchestration | `docker-compose` : Redis + Gateway + Mock service |
 | Secrets | GitHub Actions secrets : AWS keys, SSH key, ECR URI |
 | Cost protection | AWS Budget alert at $0.01 + CloudWatch alarm auto-stops instance on sustained high CPU |
-
----
 
 ## Architecture Notes
 
@@ -344,23 +328,18 @@ The `INCR` + `EXPIRE` must be atomic. Without Lua, a race between two requests c
 
 ### Circuit breaker state machine
 
-```
-     failures >= threshold
-CLOSED ──────────────────────► OPEN
-  ▲                               │
-  │  on_success()      recovery   │
-  │                   timeout     │
-  └──── HALF_OPEN ◄───────────────┘
-           │
-           │ probe fails
-           └──────────────────────► OPEN
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failures >= threshold
+    OPEN --> HALF_OPEN: recovery timeout elapsed
+    HALF_OPEN --> CLOSED: on_success()
+    HALF_OPEN --> OPEN: probe fails
 ```
 
 State is stored in Redis so all gateway replicas share it, no split brain across replicas.
 
----
-
 ## Author
 
-**Dimitrios Dalaklidis**  
-[LinkedIn](https://www.linkedin.com/in/dimitris-dalaklidis-a72838397/) · [GitHub](https://github.com/DimitriosDalaklidhs)
+**Dimitrios Dalaklidis**
+LinkedIn · GitHub
