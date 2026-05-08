@@ -2,7 +2,7 @@
 
 My proudest work so far! CI/CD INCLUDED, high performing, production ready API Gateway built with FastAPI, httpx, and Redis.
 
-CI CD
+CI / CD
 
 ```mermaid
 flowchart TB
