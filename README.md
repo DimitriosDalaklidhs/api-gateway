@@ -9,27 +9,31 @@ flowchart TB
     Clients([Clients])
 
     subgraph Gateway["API Gateway :8000"]
-        direction TB
+        direction LR
         LM[Logging Middleware]
         RL[Rate Limiter<br/>Redis sliding-window]
         CB[Circuit Breaker]
         PR[Proxy + Retry<br/>httpx, backoff]
         CA[Cache<br/>Redis]
         JWT[JWT Auth]
+
+        LM --> JWT
+        JWT --> RL
+        RL --> CA
+        CA --> CB
+        CB --> PR
     end
 
     Redis[(Redis)]
     US[user-service :8001]
     OS[order-service :8002]
-    XS[other-service]
 
-    Clients --> Gateway
+    Clients --> LM
     RL -.-> Redis
     CB -.-> Redis
     CA -.-> Redis
-    Gateway --> US
-    Gateway --> OS
-    Gateway --> XS
+    PR --> US
+    PR --> OS
 ```
 
 ## Features
