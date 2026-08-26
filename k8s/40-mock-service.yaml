@@ -1,0 +1,59 @@
+# ── Mock downstream ──────────────────────────────────────────────────────────
+# Service name + port MUST stay `mock-service:8010` — that string is hardcoded
+# as a route target in config.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-service
+  namespace: gateway
+  labels:
+    app: mock-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-service
+  template:
+    metadata:
+      labels:
+        app: mock-service
+    spec:
+      containers:
+        - name: mock-service
+          image: mock-service:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8010
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-service
+  namespace: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: mock-service
+  ports:
+    - name: http
+      port: 8010
+      targetPort: http
