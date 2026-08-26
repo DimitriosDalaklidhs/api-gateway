@@ -6,11 +6,8 @@ Also supports temporary IP bans.
 """
 
 import logging
-import time
-from typing import Tuple
 
 import redis.asyncio as aioredis
-
 from core.config import settings
 
 logger = logging.getLogger("gateway.rate_limiter")
@@ -59,7 +56,7 @@ class RateLimiter:
         ip: str,
         route_limit: int | None = None,
         path: str = "",
-    ) -> Tuple[bool, int, int]:
+    ) -> tuple[bool, int, int]:
         """
         Check & increment the counter for *ip*.
 

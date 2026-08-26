@@ -1,0 +1,12 @@
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+ignore = [
+  "B008",  # Depends() in argument defaults is the FastAPI idiom
+  "F401",  # unused imports (was already ignored in CI)
+  "UP042", # StrEnum migration changes str() semantics — breaker state is in Redis, revisit with tests
+  "SIM102",
+  "SIM117",
+]

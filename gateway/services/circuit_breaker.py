@@ -9,14 +9,12 @@ States:
 State is stored in Redis so all gateway instances share it.
 """
 
-import asyncio
 import logging
 import time
 from enum import Enum
-from typing import Callable, Optional, TypeVar
+from typing import TypeVar
 
 import redis.asyncio as aioredis
-
 from core.config import settings
 
 logger = logging.getLogger("gateway.circuit_breaker")

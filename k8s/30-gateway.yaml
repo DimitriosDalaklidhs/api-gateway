@@ -1,0 +1,83 @@
+# ── API Gateway: Deployment (3 replicas) + Service ───────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: gateway:local
+          imagePullPolicy: IfNotPresent   # no registry; image is loaded into the node
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: REDIS_HOST
+              value: "redis"              # resolves via the Redis Service DNS name
+            - name: REDIS_PORT
+              value: "6379"
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secret
+                  key: JWT_SECRET_KEY
+          volumeMounts:
+            # subPath mounts a single file instead of clobbering /app.
+            # Trade-off: subPath mounts do NOT hot-reload on ConfigMap change.
+            # You must `kubectl rollout restart deploy/gateway` after editing it.
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /admin/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /admin/health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

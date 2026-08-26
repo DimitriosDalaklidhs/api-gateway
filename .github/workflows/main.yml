@@ -37,8 +37,8 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          pip install ruff
-          ruff check gateway/ --ignore F401
+          pip install ruff==0.16.4
+          ruff check gateway/
 
       - name: Run tests
         env:

@@ -9,36 +9,18 @@ Wires together rate limiting, circuit breaking, caching, and auth.
 
 
 import logging
-
 import time
-
 import uuid
 
-from typing import Optional
-
-
-
 import redis.asyncio as aioredis
-
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-
-
-
-from core.config import settings, RouteConfig
-
+from core.config import RouteConfig, settings
 from core.redis_client import get_redis
-
-from services.auth import optional_auth, require_auth
-
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from services.auth import require_auth
 from services.cache import CacheService
-
-from services.circuit_breaker import CircuitBreakerRegistry, CircuitBreakerOpen
-
+from services.circuit_breaker import CircuitBreakerRegistry
 from services.proxy import ProxyService
-
 from services.rate_limiter import RateLimiter
-
-
 
 logger = logging.getLogger("gateway.router.proxy")
 
@@ -64,7 +46,7 @@ def _get_client_ip(request: Request) -> str:
 
 
 
-def _match_route(path: str) -> Optional[RouteConfig]:
+def _match_route(path: str) -> RouteConfig | None:
 
     """
 
@@ -74,7 +56,7 @@ def _match_route(path: str) -> Optional[RouteConfig]:
 
     """
 
-    best: Optional[RouteConfig] = None
+    best: RouteConfig | None = None
 
     best_len = -1
 

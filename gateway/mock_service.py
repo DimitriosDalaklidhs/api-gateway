@@ -9,7 +9,7 @@ Run on port 8010:
 import asyncio
 import random
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -18,19 +18,19 @@ app = FastAPI(title="Mock Downstream Service", version="1.0.0")
 
 # ── Fake data ────────────────────────────────────────────────────────────────
 
-_USERS: Dict[int, Dict] = {
+_USERS: dict[int, dict] = {
     1: {"id": 1, "name": "Alice Johnson", "email": "alice@example.com", "role": "admin"},
     2: {"id": 2, "name": "Bob Smith",     "email": "bob@example.com",   "role": "user"},
     3: {"id": 3, "name": "Carol Davis",   "email": "carol@example.com", "role": "user"},
 }
 
-_ORDERS: Dict[int, Dict] = {
+_ORDERS: dict[int, dict] = {
     101: {"id": 101, "user_id": 1, "item": "Laptop",     "total": 1299.99, "status": "shipped"},
     102: {"id": 102, "user_id": 2, "item": "Headphones", "total":  149.00, "status": "pending"},
     103: {"id": 103, "user_id": 1, "item": "Keyboard",   "total":   89.99, "status": "delivered"},
 }
 
-_failure_mode: Dict[str, Any] = {
+_failure_mode: dict[str, Any] = {
     "enabled": False,
     "rate": 0.0,
     "delay": 0.0,

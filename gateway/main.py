@@ -18,12 +18,11 @@ Bonus:
 import logging
 from contextlib import asynccontextmanager
 
+from core.config import settings
+from core.redis_client import close_redis, get_redis
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from core.config import settings
-from core.redis_client import close_redis, get_redis
 from routers.admin import router as admin_router
 from routers.proxy import router as proxy_router
 from utils.middleware import LoggingMiddleware
