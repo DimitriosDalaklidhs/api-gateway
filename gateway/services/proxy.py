@@ -13,28 +13,14 @@ Implements exponential-backoff retries on timeout or 5xx responses.
 
 
 import asyncio
-
 import logging
 
-import time
-
-from typing import Optional
-
-
-
 import httpx
-
+from core.config import RouteConfig, settings
 from fastapi import Request
-
 from fastapi.responses import Response
 
-
-
-from core.config import settings, RouteConfig
-
 from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
-
-
 
 logger = logging.getLogger("gateway.proxy")
 
@@ -104,7 +90,7 @@ class ProxyService:
 
         route: RouteConfig,
 
-        circuit_breaker: Optional[CircuitBreaker] = None,
+        circuit_breaker: CircuitBreaker | None = None,
 
     ) -> None:
 
@@ -158,7 +144,7 @@ class ProxyService:
 
 
 
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
 
 
 

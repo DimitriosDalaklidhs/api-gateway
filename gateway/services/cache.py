@@ -17,13 +17,11 @@ Cache flow:
 import hashlib
 import json
 import logging
-from typing import Optional
 
 import redis.asyncio as aioredis
+from core.config import settings
 from fastapi import Request
 from fastapi.responses import Response
-
-from core.config import settings
 
 # Namespaced logger — output appears as "gateway.cache" in log aggregators
 logger = logging.getLogger("gateway.cache")
@@ -110,7 +108,7 @@ class CacheService:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    async def get(self, request: Request) -> Optional[Response]:
+    async def get(self, request: Request) -> Response | None:
         """
         Attempt to serve the response for this request from cache.
 
@@ -169,7 +167,7 @@ class CacheService:
         self,
         request: Request,
         response: Response,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
     ) -> None:
         """
         Serialise and store a successful upstream response in Redis.

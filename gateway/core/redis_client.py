@@ -3,7 +3,6 @@ Redis connection pool shared across the application.
 """
 
 import logging
-from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -11,7 +10,7 @@ from core.config import settings
 
 logger = logging.getLogger("gateway.redis")
 
-_pool: Optional[aioredis.Redis] = None
+_pool: aioredis.Redis | None = None
 
 
 async def get_redis() -> aioredis.Redis:

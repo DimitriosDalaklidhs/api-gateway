@@ -2,14 +2,15 @@
 Shared Pydantic models used across the gateway.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
     error: str
-    detail: Optional[str] = None
-    request_id: Optional[str] = None
+    detail: str | None = None
+    request_id: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -32,7 +33,7 @@ class CircuitBreakerStatus(BaseModel):
     state: str
     failures: int
     threshold: int
-    opened_at: Optional[float] = None
+    opened_at: float | None = None
 
 
 class TokenRequest(BaseModel):
@@ -50,5 +51,5 @@ class TokenResponse(BaseModel):
 class MetricsSummary(BaseModel):
     uptime_seconds: float
     total_requests: int
-    routes: list[Dict[str, Any]]
-    circuit_breakers: list[Dict[str, Any]]
+    routes: list[dict[str, Any]]
+    circuit_breakers: list[dict[str, Any]]

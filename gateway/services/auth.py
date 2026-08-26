@@ -13,14 +13,12 @@ as a FastAPI dependency.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta, timezone
 
 import jwt
+from core.config import settings
 from fastapi import HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-from core.config import settings
 
 # Namespaced logger — output appears as "gateway.auth" in log aggregators
 logger = logging.getLogger("gateway.auth")
@@ -61,7 +59,7 @@ def create_token(
         A signed JWT string ready to be sent in an Authorization header.
     """
     cfg = settings.jwt
-    now = datetime.now(tz=timezone.utc)     # Always use UTC for JWT timestamps
+    now = datetime.now(tz=UTC)     # Always use UTC for JWT timestamps
 
     payload = {
         "sub":   subject,
@@ -97,14 +95,14 @@ def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, cfg.secret_key, algorithms=[cfg.algorithm])
 
-    except jwt.ExpiredSignatureError:
+    except jwt.ExpiredSignatureError as exc:
         # Separate branch so callers can distinguish "expired" from "malformed"
         # in logs, even though both surface as 401 to the client
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
     except jwt.InvalidTokenError as exc:
         # Catches all other PyJWT failures: bad signature, malformed structure,
@@ -113,7 +111,7 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {exc}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -146,7 +144,7 @@ async def require_auth(request: Request) -> dict:
     Raises:
         HTTPException 401: If the Authorization header is absent or the token is invalid.
     """
-    creds: Optional[HTTPAuthorizationCredentials] = await _bearer(request)
+    creds: HTTPAuthorizationCredentials | None = await _bearer(request)
 
     if creds is None:
         # Header is missing entirely — return 401 rather than 403 per RFC 6750
@@ -171,7 +169,7 @@ async def require_auth(request: Request) -> dict:
     return claims
 
 
-async def optional_auth(request: Request) -> Optional[dict]:
+async def optional_auth(request: Request) -> dict | None:
     """
     FastAPI dependency for routes that support both authenticated and anonymous access.
 
@@ -193,7 +191,7 @@ async def optional_auth(request: Request) -> Optional[dict]:
     Returns:
         The verified JWT claims dict if authentication succeeds, otherwise None.
     """
-    creds: Optional[HTTPAuthorizationCredentials] = await _bearer(request)
+    creds: HTTPAuthorizationCredentials | None = await _bearer(request)
 
     if creds is None:
         return None     # No Authorization header — anonymous request, allow through

@@ -12,18 +12,16 @@ Admin / observability endpoints.
   POST /auth/token
 """
 
-import time
 import logging
-from typing import Any, Dict, List
+import time
+from typing import Any
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
-
 from core.config import settings
 from core.redis_client import get_redis
+from fastapi import APIRouter, Depends
 from models.schemas import TokenRequest, TokenResponse
-from services.auth import create_token, require_auth
+from services.auth import create_token
 from services.cache import CacheService
 from services.circuit_breaker import CircuitBreakerRegistry
 from services.rate_limiter import RateLimiter
@@ -58,7 +56,7 @@ async def get_token(body: TokenRequest) -> TokenResponse:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/admin/health", tags=["Admin"])
-async def health(redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, Any]:
+async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
     try:
         await redis.ping()
         redis_status = "ok"
@@ -78,7 +76,7 @@ async def health(redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/admin/metrics", tags=["Admin"])
-async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, Any]:
+async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
     cb_registry = CircuitBreakerRegistry(redis)
     circuit_statuses = []
     for route in settings.routes:
@@ -111,7 +109,7 @@ async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/admin/routes", tags=["Admin"])
-async def list_routes() -> List[Dict[str, Any]]:
+async def list_routes() -> list[dict[str, Any]]:
     return [r.model_dump() for r in settings.routes]
 
 
@@ -120,7 +118,7 @@ async def list_routes() -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/admin/circuit-breakers", tags=["Admin"])
-async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> List[Dict[str, Any]]:
+async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> list[dict[str, Any]]:
     registry = CircuitBreakerRegistry(redis)
     results = []
     for route in settings.routes:
@@ -130,7 +128,7 @@ async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> List[D
 
 
 @router.post("/admin/circuit-breakers/reset", tags=["Admin"])
-async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, str]:
+async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
     registry = CircuitBreakerRegistry(redis)
     for route in settings.routes:
         cb = registry.get(route.target)
@@ -139,7 +137,7 @@ async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> Dict
 
 
 @router.post("/admin/circuit-breakers/{service_key}/reset", tags=["Admin"])
-async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, str]:
+async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
     # service_key is URL-encoded target
     import urllib.parse
     target = urllib.parse.unquote(service_key)
@@ -154,13 +152,13 @@ async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_re
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/admin/rate-limit/{ip}", tags=["Admin"])
-async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, Any]:
+async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
     rl = RateLimiter(redis)
     return await rl.get_stats(ip)
 
 
 @router.post("/admin/rate-limit/{ip}/reset", tags=["Admin"])
-async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> Dict[str, str]:
+async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
     rl = RateLimiter(redis)
     await rl.reset(ip)
     return {"status": "reset", "ip": ip}
@@ -171,7 +169,7 @@ async def ban_ip(
     ip: str,
     duration: int = 300,
     redis: aioredis.Redis = Depends(get_redis),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     rl = RateLimiter(redis)
     await rl.ban(ip, duration)
     return {"status": "banned", "ip": ip, "duration_seconds": duration}
@@ -185,7 +183,7 @@ async def ban_ip(
 async def invalidate_cache(
     pattern: str = "*",
     redis: aioredis.Redis = Depends(get_redis),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     cache = CacheService(redis)
     deleted = await cache.invalidate(pattern)
     return {"status": "invalidated", "keys_deleted": deleted, "pattern": pattern}

@@ -8,7 +8,7 @@ import logging
 import logging.handlers
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from core.config import settings
 
@@ -17,7 +17,7 @@ class JSONFormatter(logging.Formatter):
     """Emit log records as single-line JSON objects."""
 
     def format(self, record: logging.LogRecord) -> str:
-        base: Dict[str, Any] = {
+        base: dict[str, Any] = {
             "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
             "level": record.levelname,
             "logger": record.name,

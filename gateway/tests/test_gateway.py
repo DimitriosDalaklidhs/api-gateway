@@ -9,16 +9,12 @@ Run:
     pytest tests/ -v --tb=short -x  # stop on first failure, short tracebacks
 """
 
-import asyncio
-import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, Response as HttpxResponse
-
+from httpx import Response as HttpxResponse
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -172,8 +168,8 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_opens_after_threshold(self, mock_redis):
-        from services.circuit_breaker import CircuitBreaker, CircuitState
         from core.config import settings
+        from services.circuit_breaker import CircuitBreaker, CircuitState
         cb = CircuitBreaker(mock_redis, "test-service-2")
         threshold = settings.circuit_breaker.failure_threshold
         for _ in range(threshold):
@@ -192,7 +188,11 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_raises_when_open(self, mock_redis):
-        from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
+        from services.circuit_breaker import (
+            CircuitBreaker,
+            CircuitBreakerOpen,
+            CircuitState,
+        )
         cb = CircuitBreaker(mock_redis, "test-service-4")
         await cb._set_state(CircuitState.OPEN)
         await mock_redis.set(cb._key_opened, str(time.time()))
@@ -276,9 +276,8 @@ class TestProxy:
                 raise httpx.TimeoutException("timeout")
             return HttpxResponse(200, content=b'{"ok":true}')
 
-        with patch("httpx.AsyncClient.request", new=flaky_request):
-            with patch("asyncio.sleep", new=AsyncMock()):
-                resp = await proxy.forward(mock_request, "retry-req-id")
+        with patch("httpx.AsyncClient.request", new=flaky_request), patch("asyncio.sleep", new=AsyncMock()):
+            resp = await proxy.forward(mock_request, "retry-req-id")
 
         assert call_count == 3
         assert resp.status_code == 200
@@ -337,8 +336,8 @@ class TestIntegration:
         pass
 
     def test_health_endpoint(self):
-        from main import app
         from core.redis_client import get_redis
+        from main import app
 
         async def override_redis():
             r = AsyncMock()
@@ -362,8 +361,8 @@ class TestIntegration:
             assert data["token_type"] == "bearer"
 
     def test_no_route_returns_404(self):
-        from main import app
         from core.redis_client import get_redis
+        from main import app
 
         async def override_redis():
             r = AsyncMock()
