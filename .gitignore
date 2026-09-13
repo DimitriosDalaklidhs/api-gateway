@@ -7,3 +7,9 @@ logs/
 .pytest_cache/
 *.egg-info/
 .envgit
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+crash.log

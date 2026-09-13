@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs once, on first boot, as root. Output lands in
+# /var/log/cloud-init-output.log — check there when the box comes up wrong.
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg unzip
+
+# ── Docker (official repo, not the Ubuntu one) ──────────────────────────────
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+apt-get update
+apt-get install -y --no-install-recommends \
+  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+usermod -aG docker ubuntu
+
+# ── AWS CLI, for the ECR login ──────────────────────────────────────────────
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+unzip -q /tmp/awscli.zip -d /tmp
+/tmp/aws/install
+rm -rf /tmp/awscli.zip /tmp/aws
+
+# ── ECR login ───────────────────────────────────────────────────────────────
+# Credentials come from the instance profile via IMDS. Nothing is stored here.
+# The token expires after 12 hours, so the CD pipeline re-runs this line before
+# each pull rather than relying on it persisting.
+aws ecr get-login-password --region ${aws_region} \
+  | docker login --username AWS --password-stdin ${ecr_url}
+
+echo "user_data complete"
