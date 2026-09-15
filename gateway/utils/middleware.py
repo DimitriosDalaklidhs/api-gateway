@@ -96,7 +96,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _get_ip(request: Request) -> str:
-        xff = request.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",")[0].strip()
+        # The TCP peer, never X-Forwarded-For: clients set that header themselves.
+        # Behind a load balancer, uvicorn resolves the real client from it, but only
+        # for peers listed in FORWARDED_ALLOW_IPS (default 127.0.0.1).
         return request.client.host if request.client else "unknown"

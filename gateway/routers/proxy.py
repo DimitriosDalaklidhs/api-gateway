@@ -22,13 +22,6 @@ logger = logging.getLogger("gateway.router.proxy")
 router = APIRouter()
 
 
-def _get_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.client.host if request.client else "0.0.0.0"
-
-
 def _match_route(path: str) -> RouteConfig | None:
     """
     Longest-prefix match.
@@ -59,7 +52,7 @@ async def gateway_proxy(
     redis: aioredis.Redis = Depends(get_redis),
 ) -> Response:
     request_id = str(uuid.uuid4())
-    client_ip = _get_client_ip(request)
+    client_ip = request.state.client_ip  # set by LoggingMiddleware
     start = time.perf_counter()
 
     # ── Route matching ──────────────────────────────────────────────────

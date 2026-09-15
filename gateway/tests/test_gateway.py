@@ -304,6 +304,30 @@ class TestProxy:
                 resp = await proxy.forward(mock_request, "fail-req-id")
         assert resp.status_code == 502
 
+    @pytest.mark.asyncio
+    async def test_replaces_client_forwarded_for(self):
+        import httpx
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        route = RouteConfig(path="/mock", target="http://localhost:8010")
+        proxy = ProxyService(route=route)
+
+        mock_request = MagicMock()
+        mock_request.method = "GET"
+        mock_request.url.path = "/mock/echo"
+        mock_request.url.query = ""
+        mock_request.headers = {"x-forwarded-for": "6.6.6.6"}
+        mock_request.client.host = "127.0.0.1"
+        mock_request.body = AsyncMock(return_value=b"")
+
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            await proxy.forward(mock_request, "xff-req-id")
+
+        sent = httpx.Headers(downstream.call_args.kwargs["headers"])
+        assert sent.get_list("x-forwarded-for") == ["127.0.0.1"]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Auth Tests
@@ -378,3 +402,17 @@ class TestIntegration:
             resp = client.get("/nonexistent-path-xyz")
         assert resp.status_code == 404
         app.dependency_overrides.clear()
+
+    def test_rate_limiter_ignores_spoofed_forwarded_for(self):
+        from core.redis_client import get_redis
+        from main import app
+        from services.rate_limiter import RateLimiter
+
+        app.dependency_overrides[get_redis] = lambda: AsyncMock()
+        is_banned = AsyncMock(return_value=True)  # short-circuits before cache and proxy
+        with patch.object(RateLimiter, "is_banned", new=is_banned), TestClient(app) as client:
+            resp = client.get("/mock/users", headers={"X-Forwarded-For": "6.6.6.6"})
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 429
+        is_banned.assert_awaited_once_with("testclient")  # the TestClient peer, not the header

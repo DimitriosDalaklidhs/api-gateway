@@ -73,7 +73,9 @@ class ProxyService:
         body = await request.body()
         headers = _filter_headers(dict(request.headers))
         headers["X-Request-ID"] = request_id
-        headers["X-Forwarded-For"] = request.client.host if request.client else "unknown"
+        # Incoming header names are lowercase; a differently-cased key would be sent
+        # alongside the client's X-Forwarded-For instead of replacing it.
+        headers["x-forwarded-for"] = request.client.host if request.client else "unknown"
         headers["X-Gateway"] = "FastAPI-Gateway/1.0"
 
         last_exc: Exception | None = None
