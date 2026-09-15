@@ -425,7 +425,7 @@ Triggers on every push to `main` or `dev`, and on every pull request. Completes
 in under 25 seconds.
 
 - Spins up a Redis 7 service container
-- Installs dependencies
+- Installs dependencies on Python 3.12.14, the same version the image ships
 - Lints with `ruff` (pinned; rule selection in `ruff.toml`)
 - Runs all 21 tests with `pytest`
 
