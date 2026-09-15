@@ -416,3 +416,23 @@ class TestIntegration:
 
         assert resp.status_code == 429
         is_banned.assert_awaited_once_with("testclient")  # the TestClient peer, not the header
+
+    def test_request_id_matches_downstream(self, mock_redis):
+        import httpx
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream), TestClient(app) as client:
+            supplied = client.get("/mock/trace-supplied", headers={"X-Request-ID": "trace-abc"})
+            sent_supplied = httpx.Headers(downstream.call_args.kwargs["headers"])
+            generated = client.get("/mock/trace-generated")
+            sent_generated = httpx.Headers(downstream.call_args.kwargs["headers"])
+        app.dependency_overrides.clear()
+
+        # A client-supplied ID is kept end-to-end, and replaces the header rather than joining it
+        assert sent_supplied.get_list("x-request-id") == ["trace-abc"]
+        assert supplied.headers["x-request-id"] == "trace-abc"
+        # A generated ID is the same one the client gets back
+        assert sent_generated.get_list("x-request-id") == [generated.headers["x-request-id"]]

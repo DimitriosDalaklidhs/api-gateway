@@ -5,7 +5,6 @@ Wires together rate limiting, circuit breaking, caching, and auth.
 
 import logging
 import time
-import uuid
 
 import redis.asyncio as aioredis
 from core.config import RouteConfig, settings
@@ -51,8 +50,9 @@ async def gateway_proxy(
     full_path: str,
     redis: aioredis.Redis = Depends(get_redis),
 ) -> Response:
-    request_id = str(uuid.uuid4())
-    client_ip = request.state.client_ip  # set by LoggingMiddleware
+    # Both set by LoggingMiddleware, so logs, downstream and response agree
+    request_id = request.state.request_id
+    client_ip = request.state.client_ip
     start = time.perf_counter()
 
     # ── Route matching ──────────────────────────────────────────────────
