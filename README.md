@@ -110,7 +110,7 @@ flowchart TB
     │   └── middleware.py      # Phase 2: LoggingMiddleware (ASGI)
     │
     └── tests/
-        └── test_gateway.py    # 20 unit + integration tests
+        └── test_gateway.py    # 21 unit + integration tests
 ```
 
 ## Prerequisites
@@ -276,7 +276,7 @@ replica it has to be set on each one — see the Kubernetes section below.
 
 | Header | Description |
 |--------|-------------|
-| `X-Request-ID` | UUID per request; traceable end-to-end |
+| `X-Request-ID` | The client's own ID if it sent one, otherwise a new UUID; the same value is forwarded downstream and logged |
 | `X-RateLimit-Limit` | Effective limit for this route |
 | `X-RateLimit-Remaining` | Requests left in the current window |
 | `X-Response-Time-Ms` | Total gateway latency in milliseconds |
@@ -292,14 +292,15 @@ PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
 ```
 
 ```
-20 passed
+21 passed
 ```
 
 Coverage: rate limiter (allow, block, ban, reset), circuit breaker (all three
 transitions), proxy (200 forward, timeout retry, 502 exhaustion, `X-Forwarded-For`
 replacement), auth (token create/decode, invalid token rejection), and
-integration tests for health, the token endpoint, 404s on unknown routes, and
-rate limiting that ignores a spoofed `X-Forwarded-For`.
+integration tests for health, the token endpoint, 404s on unknown routes,
+rate limiting that ignores a spoofed `X-Forwarded-For`, and one request ID
+shared by the client, the logs and the downstream call.
 
 ## Kubernetes deployment
 
@@ -426,7 +427,7 @@ in under 25 seconds.
 - Spins up a Redis 7 service container
 - Installs dependencies
 - Lints with `ruff` (pinned; rule selection in `ruff.toml`)
-- Runs all 20 tests with `pytest`
+- Runs all 21 tests with `pytest`
 
 Note that CI currently covers the Python only. A broken Kubernetes manifest or
 Terraform configuration passes untouched.

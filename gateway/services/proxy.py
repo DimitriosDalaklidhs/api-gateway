@@ -72,11 +72,11 @@ class ProxyService:
         target_url = _build_target_url(request, self._route)
         body = await request.body()
         headers = _filter_headers(dict(request.headers))
-        headers["X-Request-ID"] = request_id
-        # Incoming header names are lowercase; a differently-cased key would be sent
-        # alongside the client's X-Forwarded-For instead of replacing it.
+        # Incoming header names are lowercase; differently-cased keys would be sent
+        # alongside the client's own values instead of replacing them.
+        headers["x-request-id"] = request_id
         headers["x-forwarded-for"] = request.client.host if request.client else "unknown"
-        headers["X-Gateway"] = "FastAPI-Gateway/1.0"
+        headers["x-gateway"] = "FastAPI-Gateway/1.0"
 
         last_exc: Exception | None = None
 
@@ -127,7 +127,7 @@ class ProxyService:
                             await self._cb.on_failure()
 
                     response_headers = _filter_headers(dict(resp.headers))
-                    response_headers["X-Request-ID"] = request_id
+                    response_headers["x-request-id"] = request_id
 
                     return Response(
                         content=resp.content,
