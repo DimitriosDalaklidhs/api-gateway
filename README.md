@@ -110,7 +110,7 @@ flowchart TB
     │   └── middleware.py      # Phase 2: LoggingMiddleware (ASGI)
     │
     └── tests/
-        └── test_gateway.py    # 18 unit + integration tests
+        └── test_gateway.py    # 20 unit + integration tests
 ```
 
 ## Prerequisites
@@ -188,6 +188,11 @@ rate_limiting:
   window_seconds: 60
   ban_duration_seconds: 300    # how long to block an IP after manual ban
 ```
+
+Limits and bans key on the TCP peer address, never on `X-Forwarded-For`. That
+header is set by the client, so trusting it would let anyone pick a fresh bucket
+per request. Behind a load balancer, set `FORWARDED_ALLOW_IPS` to its address and
+uvicorn resolves the real client from the header for that peer only.
 
 ### Circuit breaker
 
@@ -287,13 +292,14 @@ PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
 ```
 
 ```
-18 passed in 2.11s
+20 passed
 ```
 
 Coverage: rate limiter (allow, block, ban, reset), circuit breaker (all three
-transitions), proxy (200 forward, timeout retry, 502 exhaustion), auth (token
-create/decode, invalid token rejection), and integration tests for health, the
-token endpoint, and 404s on unknown routes.
+transitions), proxy (200 forward, timeout retry, 502 exhaustion, `X-Forwarded-For`
+replacement), auth (token create/decode, invalid token rejection), and
+integration tests for health, the token endpoint, 404s on unknown routes, and
+rate limiting that ignores a spoofed `X-Forwarded-For`.
 
 ## Kubernetes deployment
 
@@ -420,7 +426,7 @@ in under 25 seconds.
 - Spins up a Redis 7 service container
 - Installs dependencies
 - Lints with `ruff` (pinned; rule selection in `ruff.toml`)
-- Runs all 18 tests with `pytest`
+- Runs all 20 tests with `pytest`
 
 Note that CI currently covers the Python only. A broken Kubernetes manifest or
 Terraform configuration passes untouched.
