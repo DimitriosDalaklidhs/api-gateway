@@ -44,7 +44,7 @@ data:
                 "uid": "prometheus"
               },
               "refId": "A",
-              "expr": "sum(rate(http_requests_total[1m]))",
+              "expr": "sum(rate(http_requests_total[1m])) or vector(0)",
               "legendFormat": "",
               "range": true
             }
@@ -106,7 +106,7 @@ data:
                 "uid": "prometheus"
               },
               "refId": "A",
-              "expr": "100 * (sum(rate(http_requests_total{status=\"5xx\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total[1m])), 1e-9)",
+              "expr": "100 * (sum(rate(http_requests_total{status=\"5xx\"}[1m])) or vector(0)) / clamp_min(sum(rate(http_requests_total[1m])) or vector(0), 1e-9)",
               "legendFormat": "",
               "range": true
             }
@@ -342,16 +342,8 @@ data:
                 }
               ],
               "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "#0ca30c",
-                    "value": null
-                  }
-                ]
+                "mode": "fixed",
+                "fixedColor": "#0ca30c"
               },
               "custom": {
                 "fillOpacity": 80,
