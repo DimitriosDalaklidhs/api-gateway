@@ -20,8 +20,8 @@ spec:
     spec:
       containers:
         - name: mock-service
-          image: mock-service:local
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/dimitriosdalaklidhs/api-gateway:mock
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8010
