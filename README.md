@@ -58,14 +58,15 @@ flowchart TB
 .
 ├── .github/workflows/
 │   ├── main.yml               # CI: ruff + pytest against a Redis service container
-│   └── cd.yml                 # CD: build → ECR → EC2 (target decommissioned)
+│   └── cd.yml                 # CD: build → push both images to GHCR
 │
 ├── k8s/                       # Kubernetes manifests, applied in numeric order
 │   ├── 00-namespace.yaml
 │   ├── 10-redis.yaml          # PVC + Deployment + Service
 │   ├── 20-gateway-config.yaml # ConfigMap + Secret
-│   ├── 30-gateway.yaml        # Deployment + Service
-│   └── 40-mock-service.yaml   # Deployment + Service
+│   ├── 30-gateway.yaml        # Deployment + Service (scrape annotations)
+│   ├── 40-mock-service.yaml   # Deployment + Service
+│   └── monitoring/            # Prometheus + Grafana (see Monitoring)
 │
 ├── terraform/                 # AWS deployment target as code
 │   ├── versions.tf            # Pinned CLI + provider constraints
@@ -101,7 +102,8 @@ flowchart TB
     │
     ├── routers/
     │   ├── proxy.py           # Catch-all /{path} → route match + forward
-    │   └── admin.py           # /admin/* + /auth/token endpoints
+    │   ├── admin.py           # /admin/* + /auth/token endpoints
+    │   └── metrics.py         # /metrics for Prometheus + breaker gauges
     │
     ├── models/
     │   └── schemas.py         # Pydantic request/response models
@@ -110,7 +112,7 @@ flowchart TB
     │   └── middleware.py      # Phase 2: LoggingMiddleware (ASGI)
     │
     └── tests/
-        └── test_gateway.py    # 21 unit + integration tests
+        └── test_gateway.py    # 23 unit + integration tests
 ```
 
 ## Prerequisites
@@ -292,7 +294,7 @@ PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
 ```
 
 ```
-21 passed
+23 passed
 ```
 
 Coverage: rate limiter (allow, block, ban, reset), circuit breaker (all three
@@ -376,6 +378,44 @@ done
 
 Three of those gateway pods never saw a failure. They read the state out of Redis.
 
+## Monitoring
+
+The gateway exposes Prometheus metrics at `/metrics`:
+
+| Metric | What it measures |
+|---|---|
+| `http_requests_total{handler,method,status}` | Requests by status class (2xx/4xx/5xx) |
+| `http_request_duration_highr_seconds` | Latency histogram, for p50/p95/p99 |
+| `gateway_circuit_breaker_state{route,target}` | 0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN |
+| `gateway_circuit_breaker_failures{route,target}` | Failures counted toward opening |
+| `gateway_redis_up` | Whether the replica could read breaker state from Redis |
+
+Breaker gauges are read from Redis at scrape time, so every replica reports the
+same shared state. Health probes and scrapes are excluded from the HTTP metrics.
+
+`k8s/monitoring/` runs Prometheus and Grafana, sized for a 4 GB single node:
+
+- **Prometheus** discovers gateway pods through their `prometheus.io/*`
+  annotations and scrapes each replica directly, not through the Service. Its
+  RBAC is a namespaced Role that can only list pods in `gateway`. 15s scrapes,
+  3 days / 1 GB retention, `emptyDir` storage.
+- **Grafana** is provisioned from code: datasource, and an *API Gateway*
+  dashboard (request rate, 5xx rate, latency percentiles, breaker state per
+  route, Redis status, traffic per replica). Neither is exposed publicly.
+
+```bash
+kubectl apply -f k8s/monitoring/00-namespace.yaml
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=password="$(openssl rand -base64 18)"
+kubectl apply -f k8s/monitoring/
+
+# Grafana over an SSH tunnel: on your PC
+ssh -L 3000:localhost:3000 <user>@<server>
+# then on the server
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+# open http://localhost:3000 (user: admin)
+```
+
 ## Infrastructure as Code
 
 `terraform/` defines the AWS infrastructure this gateway was deployed to.
@@ -427,19 +467,21 @@ in under 25 seconds.
 - Spins up a Redis 7 service container
 - Installs dependencies on Python 3.12.14, the same version the image ships
 - Lints with `ruff` (pinned; rule selection in `ruff.toml`)
-- Runs all 21 tests with `pytest`
+- Runs all 23 tests with `pytest`
 
 Note that CI currently covers the Python only. A broken Kubernetes manifest or
 Terraform configuration passes untouched.
 
 ### CD
 
-> **Status:** the AWS deployment target has been decommissioned. The pipeline is
-> retained as reference and no longer runs against live infrastructure.
+Runs after CI succeeds on `main`, on the exact commit CI tested.
 
-- Builds the gateway image → pushes to ECR (`:gateway`)
-- Builds the mock service image → pushes to ECR (`:mock`)
-- SSHs into EC2, pulls the new images, restarts the stack via `docker-compose`
+- Builds the gateway image → pushes to GHCR (`:gateway` and `:gateway-<sha>`)
+- Builds the mock service image → pushes to GHCR (`:mock` and `:mock-<sha>`)
+- Authenticates with the workflow's own `GITHUB_TOKEN`, so no registry secrets
+
+The images are public, and the Hetzner k3s node pulls them directly. The earlier
+AWS target (ECR + EC2) was decommissioned.
 
 ### Pinned dependencies
 

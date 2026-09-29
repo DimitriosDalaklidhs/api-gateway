@@ -436,3 +436,46 @@ class TestIntegration:
         assert supplied.headers["x-request-id"] == "trace-abc"
         # A generated ID is the same one the client gets back
         assert sent_generated.get_list("x-request-id") == [generated.headers["x-request-id"]]
+
+    def test_metrics_exposes_http_and_breaker_metrics(self):
+        from core.redis_client import get_redis
+        from main import app
+
+        states = {"cb:http://mock-service:8010:state": "OPEN", "cb:http://mock-service:8010:failures": "5"}
+
+        async def override_redis():
+            r = AsyncMock()
+            r.get = AsyncMock(side_effect=lambda key: states.get(key))
+            return r
+
+        app.dependency_overrides[get_redis] = override_redis
+        with TestClient(app, raise_server_exceptions=False) as client:
+            client.post("/auth/token", json={"username": "bob", "password": "secret"})
+            resp = client.get("/metrics")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert 'gateway_circuit_breaker_state{route="/mock",target="http://mock-service:8010"} 2.0' in body
+        assert 'gateway_circuit_breaker_state{route="/users",target="http://user-service:8001"} 0.0' in body
+        assert 'gateway_circuit_breaker_failures{route="/mock",target="http://mock-service:8010"} 5.0' in body
+        assert "gateway_redis_up 1.0" in body
+        assert 'http_requests_total{handler="/auth/token",method="POST",status="2xx"}' in body
+        assert 'handler="/metrics"' not in body  # scrapes are excluded from HTTP metrics
+
+    def test_metrics_survives_redis_outage(self):
+        from core.redis_client import get_redis
+        from main import app
+
+        async def override_redis():
+            r = AsyncMock()
+            r.get = AsyncMock(side_effect=ConnectionError("redis down"))
+            return r
+
+        app.dependency_overrides[get_redis] = override_redis
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/metrics")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 200
+        assert "gateway_redis_up 0.0" in resp.text

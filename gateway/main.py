@@ -12,6 +12,7 @@ Bonus:
   ✅ JWT Authentication
   ✅ Request Caching (Redis)
   ✅ /admin/metrics endpoint
+  ✅ Prometheus /metrics (HTTP metrics + circuit breaker gauges)
   ✅ Admin control plane (ban IPs, reset circuits, invalidate cache)
 """
 
@@ -23,7 +24,9 @@ from core.redis_client import close_redis, get_redis
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from routers.admin import router as admin_router
+from routers.metrics import router as metrics_router
 from routers.proxy import router as proxy_router
 from utils.middleware import LoggingMiddleware
 
@@ -104,11 +107,16 @@ app.add_middleware(
 )
 app.add_middleware(LoggingMiddleware)
 
+# HTTP metrics (request count, latency, sizes) for Prometheus, served at /metrics.
+# Probes and scrapes are excluded so they don't drown out real traffic.
+Instrumentator(excluded_handlers=["/metrics", "/admin/health"]).instrument(app)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Routers — admin first so /admin/* paths are NOT caught by the proxy wildcard
+# Routers — admin and metrics first so they are NOT caught by the proxy wildcard
 # ─────────────────────────────────────────────────────────────────────────────
 
 app.include_router(admin_router)
+app.include_router(metrics_router)
 app.include_router(proxy_router)
 
 
