@@ -92,11 +92,13 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 20
           resources:
+            # 384Mi was OOM-killed within minutes of dashboard use on Grafana 13;
+            # the node has ~2 GB free, so there is room.
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 256Mi
             limits:
-              memory: 384Mi
+              memory: 768Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/grafana
