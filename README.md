@@ -1,388 +1,203 @@
 # API Gateway
 
-A reverse-proxy API gateway built with FastAPI, httpx and Redis. Handles routing,
-per-IP rate limiting, response caching, JWT auth and circuit breaking, with all
-shared state in Redis so the gateway scales horizontally. Runs under Docker
-Compose or Kubernetes; the AWS deployment target is defined as Terraform.
+A reverse-proxy API gateway built with FastAPI, httpx and Redis. It routes
+requests by path, rate-limits per client IP, caches responses, checks JWTs and
+trips a circuit breaker when a downstream fails. All shared state lives in
+Redis, so any number of gateway replicas behave as one.
+
+It runs on a self-managed single-node **k3s** cluster on a Hetzner VPS. GitHub
+Actions tests every change and publishes the images to GHCR, and
+**Prometheus + Grafana** track traffic, errors, latency and breaker state.
 
 ```mermaid
-flowchart TB
-    Clients([Clients])
+flowchart LR
+    subgraph GH["GitHub Actions"]
+        CI["CI: ruff + pytest"] --> CD["CD: build images"]
+    end
+    CD --> GHCR[("GHCR")]
 
-    subgraph Gateway["API Gateway :8000"]
-        direction LR
-        LM[Logging Middleware]
-        RL[Rate Limiter<br/>Redis sliding-window]
-        CB[Circuit Breaker]
-        PR[Proxy + Retry<br/>httpx, backoff]
-        CA[Cache<br/>Redis]
-        JWT[JWT Auth]
-
-        LM --> JWT
-        JWT --> RL
-        RL --> CA
-        CA --> CB
-        CB --> PR
+    subgraph K3S["Hetzner VPS · single-node k3s"]
+        subgraph APP["namespace: gateway"]
+            SVC["Service: gateway"] --> GW1["gateway pod"]
+            SVC --> GW2["gateway pod"]
+            GW1 --> R[("Redis")]
+            GW2 --> R
+            GW1 --> M["mock-service"]
+            GW2 --> M
+        end
+        subgraph MON["namespace: monitoring"]
+            P["Prometheus"] --> G["Grafana"]
+        end
     end
 
-    Redis[(Redis)]
-    US[user-service :8001]
-    OS[order-service :8002]
-
-    Clients --> LM
-    RL -.-> Redis
-    CB -.-> Redis
-    CA -.-> Redis
-    PR --> US
-    PR --> OS
+    GHCR -. image pull .-> GW1
+    GHCR -. image pull .-> GW2
+    P -. scrape /metrics .-> GW1
+    P -. scrape /metrics .-> GW2
 ```
 
 ## Features
 
-| Phase | Feature | Details |
-|-------|---------|---------|
-| 1 | Dynamic Proxy | Routes by path prefix; supports GET/POST/PUT/DELETE/PATCH |
-| 2 | Logging Middleware | JSON-structured logs to stdout + rotating file |
-| 3 | Rate Limiting | Redis sliding-window counter; per-IP, per-route limits; temp bans |
-| 4 | Retries | Exponential backoff; configurable retry-on status codes |
-| 5 | Circuit Breaker | CLOSED → OPEN → HALF-OPEN; shared state via Redis |
-| 6 | Config System | YAML file + environment variable overrides |
-| ★ | JWT Auth | Bearer token validation; optional per-route |
-| ★ | Response Cache | Redis GET cache; TTL configurable; admin invalidation |
-| ★ | Admin API | `/admin/*` control plane for live inspection & control |
-| ★ | Mock Service | Built-in downstream simulator with failure injection |
+| Feature | How it works |
+|---|---|
+| Routing | Longest-prefix match on the path; optional prefix stripping |
+| Rate limiting | Fixed-window counter per client IP in Redis (atomic Lua); each route sets its own limit; temporary bans |
+| Retries | Exponential backoff on timeouts and configurable 5xx codes |
+| Circuit breaker | CLOSED → OPEN → HALF_OPEN per downstream, state shared through Redis |
+| Response cache | Redis cache for successful GETs; TTL and invalidation via the admin API |
+| JWT auth | Bearer tokens, required per route |
+| Observability | JSON logs with a request ID carried end to end; Prometheus metrics at `/metrics` |
+| Admin API | `/admin/*` to inspect and reset breakers, limits, bans and cache |
+| Mock service | Fake downstream with failure injection, for demos and tests |
 
-## Project Structure
+## Project structure
 
 ```
 .
 ├── .github/workflows/
 │   ├── main.yml               # CI: ruff + pytest against a Redis service container
-│   └── cd.yml                 # CD: build → push both images to GHCR
+│   └── cd.yml                 # CD: build both images, push to GHCR
 │
 ├── k8s/                       # Kubernetes manifests, applied in numeric order
 │   ├── 00-namespace.yaml
 │   ├── 10-redis.yaml          # PVC + Deployment + Service
-│   ├── 20-gateway-config.yaml # ConfigMap + Secret
-│   ├── 30-gateway.yaml        # Deployment + Service (scrape annotations)
+│   ├── 20-gateway-config.yaml # ConfigMap + placeholder Secret
+│   ├── 30-gateway.yaml        # Deployment (2 replicas, scrape annotations) + Service
 │   ├── 40-mock-service.yaml   # Deployment + Service
-│   └── monitoring/            # Prometheus + Grafana (see Monitoring)
+│   └── monitoring/            # Prometheus, Grafana, dashboard
 │
-├── terraform/                 # AWS deployment target as code
-│   ├── versions.tf            # Pinned CLI + provider constraints
-│   ├── main.tf                # EC2, ECR, SG, IAM, budget, CloudWatch alarm
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── user_data.sh.tftpl     # cloud-init: Docker + ECR login
-│
-├── setup-k8s.sh               # Build images into minikube's daemon, apply manifests
-├── ruff.toml                  # Explicit lint rule selection
-├── .gitattributes             # Pins LF, so shell scripts survive Windows checkouts
+├── terraform/                 # Earlier AWS target, kept as reference
 │
 └── gateway/
     ├── main.py                # FastAPI app, lifespan, middleware wiring
     ├── config.yaml            # Route table + all tunable settings
-    ├── mock_service.py        # Fake downstream (users/orders/echo/slow)
-    ├── requirements.txt
-    ├── Dockerfile
-    ├── Dockerfile.mock
-    ├── docker-compose.yml
-    │
-    ├── core/
-    │   ├── config.py          # Pydantic settings loader (YAML + env vars)
-    │   ├── logging.py         # JSON formatter + rotating file handler
-    │   └── redis_client.py    # Shared async Redis pool
-    │
-    ├── services/
-    │   ├── proxy.py           # Phase 1+4: httpx proxy + retry logic
-    │   ├── rate_limiter.py    # Phase 3: Redis INCR sliding-window
-    │   ├── circuit_breaker.py # Phase 5: CLOSED/OPEN/HALF-OPEN FSM
-    │   ├── cache.py           # Bonus: Redis GET cache
-    │   └── auth.py            # Bonus: JWT create/decode/dependency
-    │
-    ├── routers/
-    │   ├── proxy.py           # Catch-all /{path} → route match + forward
-    │   ├── admin.py           # /admin/* + /auth/token endpoints
-    │   └── metrics.py         # /metrics for Prometheus + breaker gauges
-    │
-    ├── models/
-    │   └── schemas.py         # Pydantic request/response models
-    │
-    ├── utils/
-    │   └── middleware.py      # Phase 2: LoggingMiddleware (ASGI)
-    │
-    └── tests/
-        └── test_gateway.py    # 23 unit + integration tests
+    ├── mock_service.py        # Fake downstream with failure injection
+    ├── Dockerfile, Dockerfile.mock, docker-compose.yml
+    ├── core/                  # Settings loader, JSON logging, Redis pool
+    ├── services/              # proxy + retry, rate limiter, circuit breaker, cache, auth
+    ├── routers/               # proxy catch-all, admin API, /metrics
+    ├── utils/middleware.py    # Logging middleware (request ID, latency)
+    └── tests/test_gateway.py  # 23 unit + integration tests
 ```
 
-## Prerequisites
+## Quick start
 
-- **Docker & Docker Compose** — for running the full stack
-- **Python 3.12** — for local development (the image is pinned to `python:3.12.14-slim`)
-- **minikube + kubectl** — optional, for the Kubernetes deployment
-- **Terraform ~> 1.16** — optional, to work on the infrastructure definitions
-
-## Quick Start
-
-### Option A — Docker Compose (recommended)
+### Docker Compose
 
 ```bash
 cd gateway
 docker compose up --build
 ```
 
-| Service | Address |
-|---|---|
-| Gateway | http://localhost:8000 |
-| Mock service | http://localhost:8010 |
-| Redis | localhost:6379 |
+Gateway on `localhost:8000`, mock service on `localhost:8010`, Redis on `localhost:6379`.
 
-### Option B — Local dev
+### Local development
 
 ```bash
-# 1. Start Redis
 docker run -d -p 6379:6379 redis:7-alpine
-
-# 2. Install deps
 cd gateway
 pip install -r requirements.txt
-
-# 3. Start mock downstream
 uvicorn mock_service:app --port 8010 &
-
-# 4. Start gateway
 uvicorn main:app --port 8000 --reload
 ```
 
-### Option C — Kubernetes
+### Any Kubernetes cluster
 
-See [Kubernetes deployment](#kubernetes-deployment).
-
-## Configuration
-
-### Adding a route
-
-```yaml
-routes:
-  - path: "/payments"          # matched by prefix
-    target: "http://pay-service:8005"
-    rate_limit: 30             # req/min per IP (overrides default)
-    strip_prefix: false        # keep /payments in the forwarded URL
-    methods: ["GET", "POST"]
-    auth_required: true        # require Bearer JWT
-```
-
-`strip_prefix` decides what the downstream actually receives. With `false`, a
-request to `/payments/invoices` is forwarded as `/payments/invoices`; with
-`true`, as `/invoices`. Set it to match what the downstream serves, or every
-request 404s.
-
-`target` is a hostname, so it has to resolve in whatever network the gateway is
-running in — a Compose service name, a Kubernetes Service name. Changing the
-Service name without changing `config.yaml` breaks every route through it.
-
-### Rate limiting
-
-```yaml
-rate_limiting:
-  enabled: true
-  default_limit: 100           # requests per window
-  window_seconds: 60
-  ban_duration_seconds: 300    # how long to block an IP after manual ban
-```
-
-Limits and bans key on the TCP peer address, never on `X-Forwarded-For`. That
-header is set by the client, so trusting it would let anyone pick a fresh bucket
-per request. Behind a load balancer, set `FORWARDED_ALLOW_IPS` to its address and
-uvicorn resolves the real client from the header for that peer only.
-
-### Circuit breaker
-
-```yaml
-circuit_breaker:
-  failure_threshold: 5         # consecutive failures before OPEN
-  recovery_timeout_seconds: 30 # time in OPEN before trying HALF-OPEN
-  half_open_max_calls: 3       # probe calls allowed in HALF-OPEN
-```
-
-### Environment overrides
-
-| Variable | Description |
-|----------|-------------|
-| `REDIS_HOST` | Redis hostname |
-| `REDIS_PORT` | Redis port |
-| `JWT_SECRET_KEY` | Secret for JWT signing |
-
-Environment variables take precedence over `config.yaml`. Under Kubernetes the
-signing key comes from a Secret rather than the YAML file.
-
-## API Reference
-
-### Authentication
+The manifests pull the public images from GHCR, so they work on minikube, k3s or
+any other cluster without building anything locally.
 
 ```bash
-# Get a JWT
-curl -X POST http://localhost:8000/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "any"}'
-
-# Use it
-curl http://localhost:8000/users \
-  -H "Authorization: Bearer <token>"
-```
-
-### Proxy requests
-
-The `/mock` route is unauthenticated, so these need no token.
-
-```bash
-curl http://localhost:8000/mock/users
-
-curl -X POST http://localhost:8000/mock/echo \
-  -H "Content-Type: application/json" \
-  -d '{"hello": "world"}'
-
-# Slow response, exercises retry/timeout
-curl "http://localhost:8000/mock/slow?delay=3"
-```
-
-### Admin endpoints
-
-```bash
-curl http://localhost:8000/admin/health
-curl http://localhost:8000/admin/metrics
-curl http://localhost:8000/admin/circuit-breakers
-curl -X POST http://localhost:8000/admin/circuit-breakers/reset
-curl http://localhost:8000/admin/rate-limit/1.2.3.4
-curl -X POST "http://localhost:8000/admin/rate-limit/1.2.3.4/ban?duration=600"
-curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=*"
-```
-
-### Failure injection
-
-```bash
-# 70% of mock requests fail with 503
-curl -X POST "http://localhost:8010/mock/failure-mode?enabled=true&rate=0.7&status=503"
-
-# Watch the circuit open after 5 consecutive failures
-watch -n1 'curl -s http://localhost:8000/admin/circuit-breakers | python3 -m json.tool'
-
-# Back to normal
-curl -X POST "http://localhost:8010/mock/failure-mode?enabled=false"
-```
-
-Failure mode is in-memory state on the mock service. With more than one mock
-replica it has to be set on each one — see the Kubernetes section below.
-
-## Response Headers
-
-| Header | Description |
-|--------|-------------|
-| `X-Request-ID` | The client's own ID if it sent one, otherwise a new UUID; the same value is forwarded downstream and logged |
-| `X-RateLimit-Limit` | Effective limit for this route |
-| `X-RateLimit-Remaining` | Requests left in the current window |
-| `X-Response-Time-Ms` | Total gateway latency in milliseconds |
-| `X-Cache` | `HIT` when served from Redis cache |
-
-## Running Tests
-
-Tests use an in-memory Redis mock; no external infrastructure required.
-
-```bash
-cd gateway
-PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
-```
-
-```
-23 passed
-```
-
-Coverage: rate limiter (allow, block, ban, reset), circuit breaker (all three
-transitions), proxy (200 forward, timeout retry, 502 exhaustion, `X-Forwarded-For`
-replacement), auth (token create/decode, invalid token rejection), and
-integration tests for health, the token endpoint, 404s on unknown routes,
-rate limiting that ignores a spoofed `X-Forwarded-For`, and one request ID
-shared by the client, the logs and the downstream call.
-
-## Kubernetes deployment
-
-A full port of the Compose stack: Namespace, Deployments, Services, a ConfigMap,
-a Secret and a PVC for Redis. Verified on minikube.
-
-```bash
-minikube start
-eval $(minikube docker-env)
-docker build -t gateway:local      -f gateway/Dockerfile      gateway/
-docker build -t mock-service:local -f gateway/Dockerfile.mock gateway/
-
 kubectl apply -f k8s/
 kubectl -n gateway get pods -w
-
 kubectl -n gateway port-forward svc/gateway 8000:8000
 ```
 
-`setup-k8s.sh` wraps the build-and-apply steps.
+## Deployment: Hetzner + k3s
 
-### What changed in the port
+| | |
+|---|---|
+| Server | Hetzner CX23: 2 vCPU, 4 GB RAM, Ubuntu 26.04 LTS |
+| Hardening | Non-root user, key-only SSH, root login disabled, UFW allowing 22/80/443 plus the k3s pod and service ranges |
+| Kubernetes | k3s, single node; bundles Traefik, CoreDNS and the local-path storage provisioner |
+| Images | Pulled straight from public GHCR; no registry credentials on the cluster |
 
-| Compose | Kubernetes |
-|---------|------------|
-| `ports: "8000:8000"` | Service + `port-forward` for local access |
-| `./config.yaml:/app/config.yaml:ro` | ConfigMap, mounted via `subPath` |
-| `JWT_SECRET_KEY` env literal | Secret, consumed via `secretKeyRef` |
-| `healthcheck:` | `readinessProbe` + `livenessProbe` |
-| `depends_on: service_healthy` | nothing; see below |
-| `restart: unless-stopped` | nothing; the controller does this by default |
-| `./logs:/app/logs` | dropped; container logs go to stdout |
+### First deploy
 
-Notes on the non-obvious decisions:
+```bash
+kubectl apply -f k8s/
+
+# Replace the placeholder JWT key from the repo with a random one
+kubectl create secret generic gateway-secret -n gateway \
+  --from-literal=JWT_SECRET_KEY="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n gateway rollout restart deploy/gateway
+```
+
+> Re-applying `20-gateway-config.yaml` resets the Secret to the placeholder.
+> After changing the ConfigMap, run the secret command again.
+
+### Updating
+
+A push to `main` runs CI, then CD publishes `:gateway` and `:gateway-<sha>`.
+The pods use `imagePullPolicy: Always`, so a restart picks up the new image:
+
+```bash
+kubectl -n gateway rollout restart deploy/gateway
+kubectl -n gateway rollout status deploy/gateway
+```
+
+Every build keeps a SHA tag, so rolling back is one command:
+
+```bash
+kubectl -n gateway set image deploy/gateway \
+  gateway=ghcr.io/dimitriosdalaklidhs/api-gateway:gateway-<sha>
+```
+
+### Kubernetes design notes
 
 - **Redis uses `strategy: Recreate`.** A ReadWriteOnce volume mounts on one node
-  at a time, so the default RollingUpdate deadlocks waiting for the old pod to
-  release it. A StatefulSet with `volumeClaimTemplates` is the right answer for
-  a Redis *cluster*; for a single instance it is overkill.
-- **`subPath` mounts do not hot-reload.** Editing the ConfigMap requires
-  `kubectl rollout restart deploy/gateway` before the change takes effect.
-- **There is no `depends_on` equivalent.** Gateway pods start before Redis is
-  ready, crash-loop, and recover once Redis answers. The system converges rather
-  than sequences. An initContainer would enforce ordering if it were needed.
-- **Persistence is arguably unnecessary.** The PVC is attached and AOF is on, but
-  this workload is rate-limit counters and a response cache: losing them on
-  restart costs one window and a cold cache. Compose runs Redis with `--save ""`
-  for exactly that reason.
+  at a time, so a rolling update would wait forever for the old pod to release it.
+- **`subPath` mounts do not hot-reload.** Editing the ConfigMap needs a
+  `rollout restart` before the change takes effect.
+- **There is no `depends_on`.** Gateway pods can start before Redis is ready;
+  they report degraded until it answers, then recover. The system converges
+  rather than sequences.
+- **Redis persistence is optional here.** AOF is on so the PVC does something,
+  but the data is rate-limit counters and cache: losing it costs one window and
+  a cold cache. Compose runs Redis with persistence off for that reason.
 
-### Shared state across replicas
+## Shared state across replicas
 
-Circuit breaker state lives in Redis, so a breaker tripped by one gateway pod is
-visible to all of them.
+Breaker state lives in Redis, so a breaker tripped through one gateway pod is
+open on all of them.
 
 ```bash
 kubectl -n gateway scale deploy/gateway --replicas=4
 
-# Failure mode is per-pod in-memory state, so it has to be set on every
-# mock replica — otherwise roughly half the requests still succeed and the
-# breaker never sees five consecutive failures.
+# Failure mode is in-memory on each mock pod, so set it on every one
 for p in $(kubectl -n gateway get pods -l app=mock-service -o name); do
   kubectl -n gateway exec $p -- \
     curl -sX POST "http://localhost:8010/mock/failure-mode?enabled=true&rate=1.0&status=503"
 done
 
-# 6 requests through a single pod; threshold is 5
-for i in $(seq 1 6); do curl -s -o /dev/null http://localhost:8000/mock/users; done
+# With the port-forward from Quick start running. POSTs skip the cache, so each
+# one reaches the failing downstream (threshold is 5)
+for i in $(seq 1 6); do
+  curl -s -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"name":"demo"}' \
+    http://localhost:8000/mock/users
+done
 
-# every replica reports OPEN
+# Every replica reports OPEN, including the ones that never saw a failure
 for p in $(kubectl -n gateway get pods -l app=gateway -o name); do
   kubectl -n gateway exec $p -- curl -s http://localhost:8000/admin/circuit-breakers
 done
 ```
 
-Three of those gateway pods never saw a failure. They read the state out of Redis.
-
 ## Monitoring
 
-The gateway exposes Prometheus metrics at `/metrics`:
+The gateway serves Prometheus metrics at `/metrics`:
 
-| Metric | What it measures |
+| Metric | Meaning |
 |---|---|
 | `http_requests_total{handler,method,status}` | Requests by status class (2xx/4xx/5xx) |
 | `http_request_duration_highr_seconds` | Latency histogram, for p50/p95/p99 |
@@ -391,17 +206,19 @@ The gateway exposes Prometheus metrics at `/metrics`:
 | `gateway_redis_up` | Whether the replica could read breaker state from Redis |
 
 Breaker gauges are read from Redis at scrape time, so every replica reports the
-same shared state. Health probes and scrapes are excluded from the HTTP metrics.
+same shared state. Health probes and scrapes are left out of the HTTP metrics.
 
-`k8s/monitoring/` runs Prometheus and Grafana, sized for a 4 GB single node:
+`k8s/monitoring/` is sized for the 4 GB node:
 
-- **Prometheus** discovers gateway pods through their `prometheus.io/*`
-  annotations and scrapes each replica directly, not through the Service. Its
-  RBAC is a namespaced Role that can only list pods in `gateway`. 15s scrapes,
-  3 days / 1 GB retention, `emptyDir` storage.
-- **Grafana** is provisioned from code: datasource, and an *API Gateway*
-  dashboard (request rate, 5xx rate, latency percentiles, breaker state per
-  route, Redis status, traffic per replica). Neither is exposed publicly.
+- **Prometheus** finds gateway pods by their `prometheus.io/*` annotations and
+  scrapes each replica directly rather than through the Service, which would hit
+  a random pod each time. Its RBAC is a Role that can only list pods in the
+  `gateway` namespace. 15s scrapes, 3 days / 1 GB retention, `emptyDir` storage.
+- **Grafana** is provisioned entirely from code: the datasource and an
+  *API Gateway* dashboard with request rate, 5xx rate, latency percentiles,
+  breaker state per route, Redis status and traffic per replica.
+
+Neither is exposed publicly. Grafana is reached through an SSH tunnel:
 
 ```bash
 kubectl apply -f k8s/monitoring/00-namespace.yaml
@@ -409,137 +226,182 @@ kubectl create secret generic grafana-admin -n monitoring \
   --from-literal=password="$(openssl rand -base64 18)"
 kubectl apply -f k8s/monitoring/
 
-# Grafana over an SSH tunnel: on your PC
+# On your PC: tunnel port 3000 to the server
 ssh -L 3000:localhost:3000 <user>@<server>
-# then on the server
-kubectl port-forward -n monitoring svc/grafana 3000:3000
-# open http://localhost:3000 (user: admin)
+# In that SSH session
+kubectl -n monitoring port-forward svc/grafana 3000:3000
+# Open http://localhost:3000 and sign in as admin
 ```
 
-## Infrastructure as Code
+Run the shared-state demo above and the dashboard shows the 5xx rate spike and
+the `/mock` breaker turn red.
 
-`terraform/` defines the AWS infrastructure this gateway was deployed to.
+## Configuration
 
-> **Status:** the target account has been decommissioned. `init`, `fmt` and
-> `validate` run without credentials and pass; `plan` and `apply` do not. This
-> has never been applied against live infrastructure.
+Everything lives in `gateway/config.yaml`; environment variables override it.
+
+```yaml
+routes:
+  - path: "/payments"          # matched by prefix
+    target: "http://pay-service:8005"
+    rate_limit: 30             # requests per window per IP on this route
+    strip_prefix: false        # true forwards /payments/invoices as /invoices
+    methods: ["GET", "POST"]
+    auth_required: true        # require a Bearer JWT
+
+rate_limiting:
+  default_limit: 100
+  window_seconds: 60
+  ban_duration_seconds: 300
+
+circuit_breaker:
+  failure_threshold: 5         # failures before OPEN
+  recovery_timeout_seconds: 30 # time in OPEN before HALF_OPEN
+  half_open_max_calls: 3       # probes allowed in HALF_OPEN
+```
+
+| Variable | Overrides |
+|---|---|
+| `REDIS_HOST`, `REDIS_PORT` | Redis address |
+| `JWT_SECRET_KEY` | JWT signing key (a Secret under Kubernetes) |
+
+Two things that break routes silently:
+
+- `strip_prefix` must match what the downstream serves, or every request 404s.
+- `target` is a hostname that must resolve where the gateway runs (a Compose
+  service or Kubernetes Service name). Renaming the Service breaks the route.
+
+Rate limits key on the TCP peer address, never on `X-Forwarded-For`, which the
+client controls. Behind a load balancer, set `FORWARDED_ALLOW_IPS` to its address
+so uvicorn trusts the header from that peer only.
+
+## API reference
 
 ```bash
-cd terraform
-terraform init
-terraform fmt -check
-terraform validate
+# Get a JWT (demo: any username and password are accepted)
+curl -X POST http://localhost:8000/auth/token \
+  -H "Content-Type: application/json" -d '{"username": "alice", "password": "any"}'
+curl http://localhost:8000/users -H "Authorization: Bearer <token>"
+
+# Proxy through the unauthenticated /mock route
+curl http://localhost:8000/mock/users
+curl http://localhost:8000/mock/orders
+curl "http://localhost:8000/mock/mock/slow?delay=3"   # mock's own helpers sit under its /mock prefix
+
+# Admin
+curl http://localhost:8000/admin/health
+curl http://localhost:8000/admin/circuit-breakers
+curl -X POST http://localhost:8000/admin/circuit-breakers/reset
+curl http://localhost:8000/admin/rate-limit/1.2.3.4
+curl -X POST "http://localhost:8000/admin/rate-limit/1.2.3.4/ban?duration=600"
+curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=*"
+
+# Failure injection on the mock service (Compose / local)
+curl -X POST "http://localhost:8010/mock/failure-mode?enabled=true&rate=0.7&status=503"
+curl -X POST "http://localhost:8010/mock/failure-mode?enabled=false"
 ```
 
-| Resource | Purpose |
+Response headers:
+
+| Header | Meaning |
 |---|---|
-| `aws_instance` | `t3.micro`, Ubuntu 24.04, Docker installed via cloud-init |
-| `aws_ecr_repository` | One repo, two tags, untagged images expired after 7 days |
-| `aws_security_group` | 22 from the operator's `/32`; gateway port from anywhere |
-| `aws_iam_instance_profile` | ECR read access via IMDS — no static keys on the host |
-| `aws_budgets_budget` | Actual at 80%, forecast at 100% |
-| `aws_cloudwatch_metric_alarm` | Stops the instance on sustained high CPU |
+| `X-Request-ID` | The client's ID if it sent one, else a new UUID; forwarded downstream and logged |
+| `X-RateLimit-Limit` / `X-RateLimit-Remaining` | Limit for this route and requests left in the window |
+| `X-Response-Time-Ms` | Gateway latency |
+| `X-Cache` | `HIT` when served from the cache |
 
-Two deliberate departures from what was actually deployed:
+## Tests
 
-- **An instance profile replaces the static access keys.** The original pipeline
-  put AWS keys in GitHub Actions secrets and used them on the box to pull from
-  ECR. The profile issues short-lived credentials through the metadata service
-  instead, so there is nothing on disk to leak and nothing to rotate.
-  `http_tokens = "required"` forces IMDSv2 — relevant for a service whose entire
-  job is proxying arbitrary URLs.
-- **`ignore_changes = [ami]` on the instance.** `most_recent = true` re-resolves
-  on every plan, so a new Canonical build would otherwise appear as a pending
-  instance replacement. Same class of problem as the floating base image tag
-  below. The resolved id is in the outputs; pinning it to a literal is stricter.
+```bash
+cd gateway
+PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto   # 23 passed
+```
 
-State is local and gitignored — Terraform writes resource attributes in
-plaintext. An S3 backend is commented in `versions.tf` for anything with more
-than one operator.
+Redis is mocked in memory, so no infrastructure is needed. Coverage: rate limiter
+(allow, block, ban, reset), every breaker transition, proxy forwarding, retries
+and retry exhaustion, JWT create/decode/reject, and integration tests for health,
+tokens, unknown routes, spoofed `X-Forwarded-For`, request-ID propagation and
+`/metrics`, including a Redis outage.
 
 ## CI/CD
 
-### CI
+**CI** runs on every push to `main` or `dev` and on pull requests: a Redis 7
+service container, Python 3.12.14 (the same as the image), `ruff` lint, then
+the test suite.
 
-Triggers on every push to `main` or `dev`, and on every pull request. Completes
-in under 25 seconds.
+**CD** runs after CI succeeds on `main`, on the exact commit CI tested. It builds
+the gateway and mock images and pushes them to GHCR with a moving tag and a SHA
+tag, authenticated by the workflow's own `GITHUB_TOKEN`, so no registry secrets
+exist.
 
-- Spins up a Redis 7 service container
-- Installs dependencies on Python 3.12.14, the same version the image ships
-- Lints with `ruff` (pinned; rule selection in `ruff.toml`)
-- Runs all 23 tests with `pytest`
+**Pinned versions.** The base image is pinned to `python:3.12.14-slim` and CI
+uses the same interpreter, so a rebuild can't change Python underneath the code.
+`ruff` is pinned with an explicit rule set in `ruff.toml`, after an unpinned
+release turned the build red with no code change. Porting to Kubernetes also
+caught a startup crash: the image passed `--log-config /dev/null`, and
+`logging.config.fileConfig` rejects an empty file. It now uses `--no-access-log`.
 
-Note that CI currently covers the Python only. A broken Kubernetes manifest or
-Terraform configuration passes untouched.
+## Infrastructure as code (AWS, reference)
 
-### CD
+`terraform/` defines the earlier AWS target: an EC2 instance, an ECR repository,
+a security group, an IAM instance profile, a budget alert and a CloudWatch alarm.
+The AWS account has been decommissioned, and this configuration was never applied;
+`init`, `fmt` and `validate` pass without credentials.
 
-Runs after CI succeeds on `main`, on the exact commit CI tested.
+Two choices worth noting:
 
-- Builds the gateway image → pushes to GHCR (`:gateway` and `:gateway-<sha>`)
-- Builds the mock service image → pushes to GHCR (`:mock` and `:mock-<sha>`)
-- Authenticates with the workflow's own `GITHUB_TOKEN`, so no registry secrets
+- **An instance profile instead of static keys.** The instance gets short-lived
+  ECR credentials through the metadata service, with IMDSv2 enforced. That
+  matters for a service whose job is proxying requests to URLs.
+- **`ignore_changes = [ami]`.** The AMI lookup re-resolves on every plan, so a
+  new Ubuntu build would otherwise show as an instance replacement.
 
-The images are public, and the Hetzner k3s node pulls them directly. The earlier
-AWS target (ECR + EC2) was decommissioned.
-
-### Pinned dependencies
-
-Both the base image and `ruff` are pinned, after each broke the build with no
-code change behind it:
-
-- `python:3.12-slim` moved to a patch release where `logging.config.fileConfig`
-  rejects an empty file, and the gateway's `--log-config /dev/null` flag started
-  crashing the container on startup. Now pinned to `python:3.12.14-slim`.
-- `ruff` was installed unpinned in CI; a release widened the default rule set and
-  turned the build red. Now pinned, with an explicit `select` in `ruff.toml` so
-  the lint contract lives in the repo.
-
-The Terraform CLI and AWS provider are pinned in `versions.tf` for the same
-reason, and `.terraform.lock.hcl` is committed.
-
-## Architecture Notes
+## Architecture notes
 
 ### Request lifecycle
 
-```
-Request
-  → LoggingMiddleware (log + attach request_id)
-  → router match (longest prefix)
-  → method check
-  → JWT validation (if auth_required)
-  → rate limit check (Redis INCR + EXPIRE via Lua)
-  → cache lookup (Redis GET, GET requests only)
-  → circuit breaker guard (before_call)
-  → httpx proxy with retry loop
-  → circuit breaker update (on_success / on_failure)
-  → cache write (successful GET responses)
-  → add X-* response headers
-  → LoggingMiddleware (log response + latency)
-Response
-```
+1. Logging middleware assigns or keeps the request ID
+2. Longest-prefix route match, then method check
+3. JWT validation, if the route requires it
+4. Ban check, then the rate limit (an atomic Lua script)
+5. Cache lookup, for GETs
+6. Circuit breaker guard
+7. Proxy with retries and backoff
+8. Breaker update, cache write, `X-*` headers, response log
 
-### Why Lua for rate limiting?
+### Why Lua for rate limiting
 
-`INCR` and `EXPIRE` must be atomic. Without Lua, a race between two requests
-could both see `count == 1` and both set the TTL, resetting the window. The Lua
-script runs atomically on the Redis server.
+The limiter increments a counter and sets its expiry on the first hit. Done as
+two separate commands, a crash between them leaves a counter with no TTL, and
+that client stays limited forever. The Lua script runs both atomically on the
+Redis server.
 
-### Circuit breaker state machine
+### Circuit breaker
 
 ```mermaid
 stateDiagram-v2
     [*] --> CLOSED
     CLOSED --> OPEN: failures >= threshold
     OPEN --> HALF_OPEN: recovery timeout elapsed
-    HALF_OPEN --> CLOSED: on_success()
+    HALF_OPEN --> CLOSED: probe succeeds
     HALF_OPEN --> OPEN: probe fails
 ```
 
-State is stored in Redis so all gateway replicas share it, with no split brain.
-Verified under horizontal scaling; see
-[Shared state across replicas](#shared-state-across-replicas).
+## Known limitations
+
+- **Single node.** No control-plane HA and no replicated storage; losing the VPS
+  takes everything down. A multi-node setup would add etcd quorum, MetalLB and
+  Longhorn.
+- **Deploys are a manual `rollout restart`.** CD publishes images but doesn't
+  touch the cluster yet.
+- **Not exposed publicly yet.** No Ingress or TLS. `/admin/*` and `/metrics`
+  have no auth, which is only acceptable while the Service stays internal.
+- **Demo auth.** `/auth/token` issues a token for any credentials.
+- **Fixed-window limiting.** A client can send up to twice the limit across a
+  window boundary; a sliding window would smooth that out.
+- **Prometheus history is ephemeral** (`emptyDir`), a deliberate cost trade-off.
+- **CI covers the Python only.** Manifests and Terraform are validated by hand.
 
 ## Author
 
-**Dimitrios Dalaklidis**
+**Dimitrios Dalaklidis** · [GitHub](https://github.com/DimitriosDalaklidhs)
