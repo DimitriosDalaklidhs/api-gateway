@@ -1,7 +1,4 @@
-# ── ConfigMap: your config.yaml verbatim, minus the JWT secret ───────────────
-# The secret_key below is a PLACEHOLDER. The real value comes from the Secret
-# as the JWT_SECRET_KEY env var. VERIFY your config loader actually prefers the
-# env var over the yaml value — if it does not, auth will use the placeholder.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -38,13 +35,13 @@ data:
       connect_timeout_seconds: 5
     routes:
       - path: "/users"
-        target: "http://user-service:8001"
+        target: "http://mock-service:8010"
         rate_limit: 100
         strip_prefix: false
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
         auth_required: true
       - path: "/orders"
-        target: "http://order-service:8002"
+        target: "http://mock-service:8010"
         rate_limit: 50
         strip_prefix: false
         methods: ["GET", "POST", "PUT", "DELETE"]
