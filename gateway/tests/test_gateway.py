@@ -457,7 +457,7 @@ class TestIntegration:
         assert resp.status_code == 200
         body = resp.text
         assert 'gateway_circuit_breaker_state{route="/mock",target="http://mock-service:8010"} 2.0' in body
-        assert 'gateway_circuit_breaker_state{route="/users",target="http://user-service:8001"} 0.0' in body
+        assert 'gateway_circuit_breaker_state{route="/public",target="http://public-service:8003"} 0.0' in body
         assert 'gateway_circuit_breaker_failures{route="/mock",target="http://mock-service:8010"} 5.0' in body
         assert "gateway_redis_up 1.0" in body
         assert 'http_requests_total{handler="/auth/token",method="POST",status="2xx"}' in body
