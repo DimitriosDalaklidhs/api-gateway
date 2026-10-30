@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 
+from core.logging import request_id_var
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -34,6 +35,22 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         request.state.client_ip = client_ip
         request.state.start_time = start
 
+        # Every log line written while this request is in flight carries its ID
+        token = request_id_var.set(request_id)
+        try:
+            return await self._dispatch(request, call_next, request_id, client_ip, path, start)
+        finally:
+            request_id_var.reset(token)
+
+    async def _dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+        request_id: str,
+        client_ip: str,
+        path: str,
+        start: float,
+    ) -> Response:
         quiet = path in _QUIET_PATHS
 
         if not quiet:
@@ -97,6 +114,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     @staticmethod
     def _get_ip(request: Request) -> str:
         # The TCP peer, never X-Forwarded-For: clients set that header themselves.
-        # Behind a load balancer, uvicorn resolves the real client from it, but only
-        # for peers listed in FORWARDED_ALLOW_IPS (default 127.0.0.1).
+        # uvicorn would rewrite the peer from that header for trusted addresses
+        # (127.0.0.1 by default, which is where kubectl port-forward traffic comes
+        # from), so the image runs it with --no-proxy-headers.
         return request.client.host if request.client else "unknown"
