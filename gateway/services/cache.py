@@ -2,9 +2,9 @@
 Redis request/response cache for the API Gateway.
 
 Only caches responses for configurable HTTP methods (default: GET).
-Cache keys are derived from a SHA-256 hash of the method + full URL,
-ensuring distinct entries per unique request while keeping key lengths
-predictable and Redis-safe.
+Cache keys are the request path plus a SHA-256 hash of the method, full URL
+and Authorization header: requests from different callers never share an
+entry, and entries can be invalidated by path pattern.
 
 Cache flow:
     Incoming request
@@ -36,13 +36,16 @@ def _cache_key(request: Request) -> str:
     Derive a deterministic Redis key for the given request.
 
     Strategy:
-        raw = "<METHOD>:<full URL including query string>"
-        key = <cache_prefix> + SHA-256(raw)
+        raw = "<METHOD>:<full URL including query string>:<Authorization header>"
+        key = <cache_prefix> + <path> + ":" + SHA-256(raw)
 
-    SHA-256 is used to:
-      - Keep key length constant (64 hex chars) regardless of URL length
-      - Avoid Redis key-size issues with very long query strings
-      - Prevent special characters in URLs from corrupting key patterns
+    The Authorization header is part of the hash so that one user's response
+    is never served to another: on an authenticated route, GET /users/me
+    returns different data for each caller. Anonymous requests share entries.
+
+    The readable path in front lets the admin API invalidate by path pattern
+    (e.g. "/users*"). The hash keeps the rest a fixed length however long the
+    query string is.
 
     Note: query params are included via request.url (FastAPI preserves their
     original order). If param order varies between clients, consider sorting
@@ -52,13 +55,14 @@ def _cache_key(request: Request) -> str:
         request: The incoming FastAPI request.
 
     Returns:
-        A prefixed, fixed-length Redis key string.
+        A prefixed Redis key string.
     """
-    # Concatenate method and full URL (includes path + query string)
-    raw = f"{request.method}:{request.url}"
+    # Method, full URL (path + query string) and the caller's credentials
+    raw = f"{request.method}:{request.url}:{request.headers.get('authorization', '')}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()
     # Prefix scopes the key to this service, making it safe to share a Redis
     # instance with other applications without key collisions
-    return settings.caching.cache_prefix + hashlib.sha256(raw.encode()).hexdigest()
+    return f"{settings.caching.cache_prefix}{request.url.path}:{digest}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -227,7 +231,7 @@ class CacheService:
 
         The cache prefix is prepended automatically, so callers pass only the
         meaningful part of the pattern (e.g. "*" to flush the entire cache,
-        or "/api/books*" to invalidate all book-related entries).
+        or "/users*" to invalidate every entry under /users).
 
         Args:
             pattern: Key suffix pattern using Redis glob syntax (* and ?).
@@ -235,8 +239,10 @@ class CacheService:
         Returns:
             The number of keys deleted (0 if no keys matched).
         """
+        # SCAN walks the keyspace in small batches. KEYS would block Redis,
+        # and with it every request's rate-limit check, until it finished.
         # Prepend the cache prefix so the scan is scoped to this service's keys
-        keys = await self._redis.keys(self._cfg.cache_prefix + pattern)
+        keys = [k async for k in self._redis.scan_iter(match=self._cfg.cache_prefix + pattern, count=500)]
         if keys:
             # Unpack all matched keys into a single DELETE call for efficiency
             return await self._redis.delete(*keys)
