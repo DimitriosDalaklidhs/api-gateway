@@ -93,7 +93,9 @@ async def gateway_proxy(
             media_type="application/json",
         )
 
-    allowed, count, limit = await rl.check(client_ip, route.rate_limit, request.url.path)
+    # Keyed on the route prefix (e.g. "/users"), not the request path, so
+    # /users/1 and /users/2 share the /users limit
+    allowed, count, limit = await rl.check(client_ip, route.rate_limit, route.path)
     if not allowed:
         return Response(
             content=f'{{"error": "Rate limit exceeded ({count}/{limit})","retry_after": {settings.rate_limiting.window_seconds}}}',
@@ -126,7 +128,7 @@ async def gateway_proxy(
         await cache.set(request, response)
 
     # ── Response headers ────────────────────────────────────────────────
-    remaining = await rl.remaining(client_ip, route.rate_limit)
+    remaining = await rl.remaining(client_ip, route.rate_limit, route.path)
     response.headers["X-RateLimit-Limit"] = str(limit)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
     response.headers["X-Request-ID"] = request_id
