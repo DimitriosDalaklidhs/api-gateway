@@ -41,21 +41,21 @@ flowchart LR
 | Feature | How it works |
 |---|---|
 | Routing | Longest-prefix match on the path; optional prefix stripping |
-| Rate limiting | Fixed-window counter per client IP in Redis (atomic Lua); each route sets its own limit; temporary bans |
-| Retries | Exponential backoff on timeouts and configurable 5xx codes |
-| Circuit breaker | CLOSED → OPEN → HALF_OPEN per downstream, state shared through Redis |
-| Response cache | Redis cache for successful GETs; TTL and invalidation via the admin API |
+| Rate limiting | Fixed-window counter per client IP and route in Redis (atomic Lua), each route with its own limit; temporary bans that the admin API can lift |
+| Retries | Exponential backoff on timeouts and configurable 5xx codes, for idempotent methods only; any method is retried if the connection never opened |
+| Circuit breaker | CLOSED → OPEN → HALF_OPEN per downstream, one outcome per client request, state shared through Redis |
+| Response cache | Redis cache for successful GETs, never shared between callers with different `Authorization` headers; TTL from config, invalidation by path pattern via the admin API |
 | JWT auth | Bearer tokens, required per route |
 | Observability | JSON logs with a request ID carried end to end; Prometheus metrics at `/metrics` |
 | Admin API | `/admin/*` to inspect and reset breakers, limits, bans and cache |
-| Mock service | Fake downstream with failure injection, for demos and tests |
+| Mock service | Fake downstream with failure injection, for demos and manual testing |
 
 ## Project structure
 
 ```
 .
 ├── .github/workflows/
-│   ├── main.yml               # CI: ruff + pytest against a Redis service container
+│   ├── main.yml               # CI: ruff + pytest, with a Redis service container for the real-Redis tests
 │   └── cd.yml                 # CD: build both images, push to GHCR
 │
 ├── k8s/                       # Kubernetes manifests, applied in numeric order
@@ -77,7 +77,7 @@ flowchart LR
     ├── services/              # proxy + retry, rate limiter, circuit breaker, cache, auth
     ├── routers/               # proxy catch-all, admin API, /metrics
     ├── utils/middleware.py    # Logging middleware (request ID, latency)
-    └── tests/test_gateway.py  # 23 unit + integration tests
+    └── tests/test_gateway.py  # 46 unit + integration tests
 ```
 
 ## Quick start
@@ -93,12 +93,16 @@ Gateway on `localhost:8000`, mock service on `localhost:8010`, Redis on `localho
 
 ### Local development
 
+`config.yaml` uses the Compose and Kubernetes hostnames `redis` and
+`mock-service`. Run those two in Compose and point the names at your machine,
+so the same config works everywhere:
+
 ```bash
-docker run -d -p 6379:6379 redis:7-alpine
 cd gateway
+docker compose up -d redis mock-service
+echo "127.0.0.1 redis mock-service" | sudo tee -a /etc/hosts   # once
 pip install -r requirements.txt
-uvicorn mock_service:app --port 8010 &
-uvicorn main:app --port 8000 --reload
+uvicorn main:app --port 8000 --reload --no-proxy-headers
 ```
 
 ### Any Kubernetes cluster
@@ -180,8 +184,8 @@ for p in $(kubectl -n gateway get pods -l app=mock-service -o name); do
     curl -sX POST "http://localhost:8010/mock/failure-mode?enabled=true&rate=1.0&status=503"
 done
 
-# With the port-forward from Quick start running. POSTs skip the cache, so each
-# one reaches the failing downstream (threshold is 5)
+# With the port-forward from Quick start running. POSTs skip the cache and aren't
+# retried, so each one is exactly one failure (threshold is 5); the 6th is rejected
 for i in $(seq 1 6); do
   curl -s -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"name":"demo"}' \
     http://localhost:8000/mock/users
@@ -202,7 +206,7 @@ The gateway serves Prometheus metrics at `/metrics`:
 | `http_requests_total{handler,method,status}` | Requests by status class (2xx/4xx/5xx) |
 | `http_request_duration_highr_seconds` | Latency histogram, for p50/p95/p99 |
 | `gateway_circuit_breaker_state{route,target}` | 0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN |
-| `gateway_circuit_breaker_failures{route,target}` | Failures counted toward opening |
+| `gateway_circuit_breaker_failures{route,target}` | Failed requests counted toward opening |
 | `gateway_redis_up` | Whether the replica could read breaker state from Redis |
 
 Breaker gauges are read from Redis at scrape time, so every replica reports the
@@ -234,11 +238,14 @@ kubectl -n monitoring port-forward svc/grafana 3000:3000
 ```
 
 Run the shared-state demo above and the dashboard shows the 5xx rate spike and
-the `/mock` breaker turn red.
+the breaker turn red on `/mock`, `/users` and `/orders`. All three routes point
+at `mock-service`, and breakers are per downstream, so they share one.
 
 ## Configuration
 
 Everything lives in `gateway/config.yaml`; environment variables override it.
+Under Kubernetes the ConfigMap in `k8s/20-gateway-config.yaml` replaces that
+file, so keep the two in step.
 
 ```yaml
 routes:
@@ -255,7 +262,7 @@ rate_limiting:
   ban_duration_seconds: 300
 
 circuit_breaker:
-  failure_threshold: 5         # failures before OPEN
+  failure_threshold: 5         # failed requests in a row before OPEN; retries count once
   recovery_timeout_seconds: 30 # time in OPEN before HALF_OPEN
   half_open_max_calls: 3       # probes allowed in HALF_OPEN
 ```
@@ -272,8 +279,11 @@ Two things that break routes silently:
   service or Kubernetes Service name). Renaming the Service breaks the route.
 
 Rate limits key on the TCP peer address, never on `X-Forwarded-For`, which the
-client controls. Behind a load balancer, set `FORWARDED_ALLOW_IPS` to its address
-so uvicorn trusts the header from that peer only.
+client controls. By default uvicorn trusts that header from 127.0.0.1, which is
+where `kubectl port-forward` traffic comes from, so the image runs it with
+`--no-proxy-headers`. Behind a load balancer, replace that flag with
+`--forwarded-allow-ips=<load balancer address>` so uvicorn trusts the header from
+that peer only.
 
 ## API reference
 
@@ -292,9 +302,13 @@ curl "http://localhost:8000/mock/mock/slow?delay=3"   # mock's own helpers sit u
 curl http://localhost:8000/admin/health
 curl http://localhost:8000/admin/circuit-breakers
 curl -X POST http://localhost:8000/admin/circuit-breakers/reset
-curl http://localhost:8000/admin/rate-limit/1.2.3.4
+curl -X POST http://localhost:8000/admin/circuit-breakers/http%3A%2F%2Fmock-service%3A8010/reset  # one target
+curl http://localhost:8000/admin/rate-limit/1.2.3.4                    # counters per route, ban status
+curl -X POST http://localhost:8000/admin/rate-limit/1.2.3.4/reset      # clear its counters on every route
 curl -X POST "http://localhost:8000/admin/rate-limit/1.2.3.4/ban?duration=600"
-curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=*"
+curl -X DELETE http://localhost:8000/admin/rate-limit/1.2.3.4/ban      # lift the ban early
+curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=/users*"
+curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=*"  # everything
 
 # Failure injection on the mock service (Compose / local)
 curl -X POST "http://localhost:8010/mock/failure-mode?enabled=true&rate=0.7&status=503"
@@ -314,25 +328,35 @@ Response headers:
 
 ```bash
 cd gateway
-PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto   # 23 passed
+PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto   # 44 passed, 2 skipped
 ```
 
-Redis is mocked in memory, so no infrastructure is needed. Coverage: rate limiter
-(allow, block, ban, reset), every breaker transition, proxy forwarding, retries
-and retry exhaustion, JWT create/decode/reject, and integration tests for health,
-tokens, unknown routes, spoofed `X-Forwarded-For`, request-ID propagation and
-`/metrics`, including a Redis outage.
+Most tests fake Redis in memory, so no infrastructure is needed. Two tests run
+the Lua script and the circuit breaker against a real Redis, because a fake
+can't run Lua or expire keys. They're skipped unless one is reachable: CI
+provides one, and locally `REDIS_HOST=localhost` with Redis running brings the
+count to 46.
+
+Coverage: rate limiter (per-route limits, block, ban and unban, reset, fail-open),
+every breaker transition including recovery after a quiet period, probe limits
+and fail-open, proxy forwarding, retries, retry exhaustion and which methods get
+retried, one breaker failure per request, cache keys per caller and invalidation
+by path, JWT create/decode/reject, and integration tests for health, tokens,
+unknown routes, spoofed `X-Forwarded-For`, request-ID propagation, `/metrics`,
+unban, per-target breaker reset and a Redis outage.
 
 ## CI/CD
 
 **CI** runs on every push to `main` or `dev` and on pull requests: a Redis 7
-service container, Python 3.12.14 (the same as the image), `ruff` lint, then
-the test suite.
+service container for the real-Redis tests, Python 3.12.14 (the same as the
+image), `ruff` lint, then the test suite.
 
-**CD** runs after CI succeeds on `main`, on the exact commit CI tested. It builds
-the gateway and mock images and pushes them to GHCR with a moving tag and a SHA
-tag, authenticated by the workflow's own `GITHUB_TOKEN`, so no registry secrets
-exist.
+**CD** runs after CI succeeds on a push to `main`, on the exact commit CI tested.
+It builds the gateway and mock images and pushes them to GHCR with a moving tag
+and a SHA tag, authenticated by the workflow's own `GITHUB_TOKEN`, so no registry
+secrets exist. Pull requests never publish. The `workflow_run` branch filter
+alone would let one through: it matches the branch the CI run came from, so a
+fork's branch named `main` passes it. The job also checks the event and repository.
 
 **Pinned versions.** The base image is pinned to `python:3.12.14-slim` and CI
 uses the same interpreter, so a rebuild can't change Python underneath the code.
@@ -365,9 +389,16 @@ Two choices worth noting:
 3. JWT validation, if the route requires it
 4. Ban check, then the rate limit (an atomic Lua script)
 5. Cache lookup, for GETs
-6. Circuit breaker guard
-7. Proxy with retries and backoff
-8. Breaker update, cache write, `X-*` headers, response log
+6. Circuit breaker guard, once per request
+7. Proxy with retries and backoff, for idempotent methods
+8. Breaker update (one outcome per request), cache write, `X-*` headers, response log
+
+### When Redis is down
+
+Rate limits, bans and the circuit breaker fail open, and the cache is bypassed:
+traffic keeps flowing without those protections. `/admin/health` reports
+`degraded` but still returns 200, so pods stay in rotation, and they recover
+by themselves once Redis answers again. Admin endpoints that need Redis return 503.
 
 ### Why Lua for rate limiting
 
@@ -387,6 +418,11 @@ stateDiagram-v2
     HALF_OPEN --> OPEN: probe fails
 ```
 
+A failure is a client request that ended in a 5xx or no response; its retries
+count once. The OPEN → HALF_OPEN check runs on the first request after the
+timeout, and the time the breaker opened is stored without an expiry, so a
+breaker recovers however long it saw no traffic.
+
 ## Known limitations
 
 - **Single node.** No control-plane HA and no replicated storage; losing the VPS
@@ -399,6 +435,11 @@ stateDiagram-v2
 - **Demo auth.** `/auth/token` issues a token for any credentials.
 - **Fixed-window limiting.** A client can send up to twice the limit across a
   window boundary; a sliding window would smooth that out.
+- **Breaker transitions aren't atomic.** Each is a read followed by writes, so
+  two replicas reaching a transition at the same moment can both act and let an
+  extra probe through. A Lua script per transition would close that gap.
+- **No upstream connection pooling.** Each proxied request opens a new HTTP
+  client, so every call pays for a fresh TCP handshake.
 - **Prometheus history is ephemeral** (`emptyDir`), a deliberate cost trade-off.
 - **CI covers the Python only.** Manifests and Terraform are validated by hand.
 
