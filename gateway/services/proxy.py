@@ -2,7 +2,8 @@
 Phase 1 + 4 — Async Proxy with Retry Logic.
 
 Forwards requests to downstream services using httpx.
-Implements exponential-backoff retries on timeout or 5xx responses.
+Implements exponential-backoff retries on timeout or 5xx responses, for
+idempotent methods only.
 """
 
 import asyncio
@@ -13,7 +14,7 @@ from core.config import RouteConfig, settings
 from fastapi import Request
 from fastapi.responses import Response
 
-from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
 
 logger = logging.getLogger("gateway.proxy")
 
@@ -26,9 +27,25 @@ _HOP_BY_HOP = frozenset(
     }
 )
 
+# httpx hands us the body already decompressed, so the upstream's encoding and
+# length no longer describe it. Starlette recomputes content-length.
+_DECODED_BODY = frozenset({"content-encoding", "content-length"})
+
+# Safe to send twice: repeating them leaves the server in the same state.
+# POST and PATCH are not: a retried POST can create the same order twice.
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+
+# Errors where the connection was never made, so the upstream never saw the
+# request: safe to retry whatever the method.
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
+
 
 def _filter_headers(headers: dict) -> dict:
     return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP}
+
+
+def _filter_response_headers(headers: dict) -> dict:
+    return {k: v for k, v in _filter_headers(headers).items() if k.lower() not in _DECODED_BODY}
 
 
 def _build_target_url(request: Request, route: RouteConfig) -> str:
@@ -62,12 +79,23 @@ class ProxyService:
             pool=self._proxy_cfg.timeout_seconds,
         )
 
+    async def _record(self, cb_state: CircuitState, success: bool) -> None:
+        """Report one outcome per client request to the circuit breaker."""
+        if not self._cb:
+            return
+        if success:
+            await self._cb.on_success(cb_state)
+        else:
+            await self._cb.on_failure(cb_state)
+
     async def forward(self, request: Request, request_id: str) -> Response:
         """
         Forward *request* to the target service.
 
-        Retries up to max_attempts on timeout or retryable status codes.
-        Integrates with the circuit breaker if one was provided.
+        Retries up to max_attempts on timeout or retryable status codes, but
+        only for idempotent methods. Any method is retried when the connection
+        was never made. The circuit breaker is consulted once per client
+        request and told one outcome, however many attempts that took.
         """
         target_url = _build_target_url(request, self._route)
         body = await request.body()
@@ -78,10 +106,26 @@ class ProxyService:
         headers["x-forwarded-for"] = request.client.host if request.client else "unknown"
         headers["x-gateway"] = "FastAPI-Gateway/1.0"
 
+        # Circuit breaker guard: once per client request, not per attempt
+        cb_state = CircuitState.CLOSED
+        if self._cb:
+            try:
+                cb_state = await self._cb.before_call()
+            except CircuitBreakerOpen as exc:
+                return Response(
+                    content=f'{{"error": "Service unavailable (circuit open): {exc.service}"}}',
+                    status_code=503,
+                    media_type="application/json",
+                )
+
+        idempotent = request.method.upper() in _IDEMPOTENT_METHODS
+        max_attempts = self._cfg.max_attempts
+        resp: httpx.Response | None = None
         last_exc: Exception | None = None
+        attempts = 0
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for attempt in range(self._cfg.max_attempts):
+            for attempt in range(max_attempts):
                 if attempt:
                     sleep_secs = self._cfg.backoff_factor * (2 ** (attempt - 1))
                     logger.info(
@@ -95,16 +139,8 @@ class ProxyService:
                     )
                     await asyncio.sleep(sleep_secs)
 
-                # Circuit breaker guard
-                if self._cb:
-                    try:
-                        await self._cb.before_call()
-                    except CircuitBreakerOpen as exc:
-                        return Response(
-                            content=f'{{"error": "Service unavailable (circuit open): {exc.service}"}}',
-                            status_code=503,
-                            media_type="application/json",
-                        )
+                attempts += 1
+                is_last = attempt == max_attempts - 1
 
                 try:
                     resp = await client.request(
@@ -113,46 +149,11 @@ class ProxyService:
                         headers=headers,
                         content=body,
                     )
-
-                    if resp.status_code in self._cfg.retry_on_status and attempt < self._cfg.max_attempts - 1:
-                        if self._cb:
-                            await self._cb.on_failure()
-                        last_exc = Exception(f"Retryable status {resp.status_code}")
-                        continue
-
-                    if self._cb:
-                        if resp.status_code < 500:
-                            await self._cb.on_success()
-                        else:
-                            await self._cb.on_failure()
-
-                    response_headers = _filter_headers(dict(resp.headers))
-                    response_headers["x-request-id"] = request_id
-
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        headers=response_headers,
-                        media_type=resp.headers.get("content-type"),
-                    )
-
-                except httpx.TimeoutException as exc:
-                    logger.warning(
-                        "Request timeout",
-                        extra={
-                            "attempt": attempt + 1,
-                            "target": target_url,
-                            "error": str(exc),
-                            "request_id": request_id,
-                        },
-                    )
-                    if self._cb:
-                        await self._cb.on_failure()
-                    last_exc = exc
-
                 except httpx.RequestError as exc:
+                    resp = None
+                    last_exc = exc
                     logger.warning(
-                        "Request error",
+                        "Request timeout" if isinstance(exc, httpx.TimeoutException) else "Request error",
                         extra={
                             "attempt": attempt + 1,
                             "target": target_url,
@@ -160,22 +161,39 @@ class ProxyService:
                             "request_id": request_id,
                         },
                     )
-                    if self._cb:
-                        await self._cb.on_failure()
-                    last_exc = exc
+                    if is_last or not (idempotent or isinstance(exc, _NEVER_SENT)):
+                        break
+                    continue
 
-        # All attempts exhausted
-        logger.error(
-            "All retry attempts failed",
-            extra={
-                "target": target_url,
-                "attempts": self._cfg.max_attempts,
-                "error": str(last_exc),
-                "request_id": request_id,
-            },
-        )
+                if resp.status_code in self._cfg.retry_on_status and idempotent and not is_last:
+                    continue
+                break
+
+        if resp is None:
+            await self._record(cb_state, success=False)
+            logger.error(
+                "Upstream request failed",
+                extra={
+                    "target": target_url,
+                    "attempts": attempts,
+                    "error": str(last_exc),
+                    "request_id": request_id,
+                },
+            )
+            return Response(
+                content=f'{{"error": "Upstream unavailable after {attempts} attempt(s)"}}',
+                status_code=502,
+                media_type="application/json",
+            )
+
+        await self._record(cb_state, success=resp.status_code < 500)
+
+        response_headers = _filter_response_headers(dict(resp.headers))
+        response_headers["x-request-id"] = request_id
+
         return Response(
-            content=f'{{"error": "Upstream unavailable after {self._cfg.max_attempts} attempts"}}',
-            status_code=502,
-            media_type="application/json",
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=response_headers,
+            media_type=resp.headers.get("content-type"),
         )
