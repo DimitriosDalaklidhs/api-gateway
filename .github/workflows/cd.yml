@@ -15,7 +15,13 @@ jobs:
   publish:
     name: Build & Push to GHCR
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # The `branches` filter above matches the branch the CI run came from, so a
+    # pull request from a fork's branch named "main" passes it too. Publish only
+    # pushes to this repository, never pull request code.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
 
     steps:
       - name: Checkout the commit CI tested
