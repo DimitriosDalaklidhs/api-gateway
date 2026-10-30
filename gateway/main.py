@@ -2,12 +2,12 @@
 API Gateway — entry point.
 
 Phases implemented:
-  1 ✅ Basic Proxy (GET/POST/PUT/DELETE/PATCH + dynamic routing)
-  2 ✅ Logging Middleware (JSON structured logs → file + stdout)
-  3 ✅ Rate Limiting (Redis sliding-window, per-IP, per-route limits)
-  4 ✅ Retries (httpx, exponential backoff, configurable status codes)
-  5 ✅ Circuit Breaker (CLOSED/OPEN/HALF-OPEN, Redis state)
-  6 ✅ Config System (YAML + env-var overrides)
+  1  Basic Proxy (GET/POST/PUT/DELETE/PATCH + dynamic routing)
+  2  Logging Middleware (JSON structured logs → file + stdout)
+  3  Rate Limiting (Redis fixed-window counter per client IP and route)
+  4  Retries (httpx, exponential backoff, configurable status codes)
+  5  Circuit Breaker (CLOSED/OPEN/HALF-OPEN, Redis state)
+  6  Config System (YAML + env-var overrides)
 Bonus:
   ✅ JWT Authentication
   ✅ Request Caching (Redis)
@@ -19,12 +19,14 @@ Bonus:
 import logging
 from contextlib import asynccontextmanager
 
+import core.logging  # importing it installs the JSON log handlers
 from core.config import settings
 from core.redis_client import close_redis, get_redis
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from redis.exceptions import RedisError
 from routers.admin import router as admin_router
 from routers.metrics import router as metrics_router
 from routers.proxy import router as proxy_router
@@ -95,7 +97,8 @@ Built with **FastAPI** + **httpx** + **Redis**.
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Middleware (outermost registered = outermost in chain)
+# Middleware. Starlette wraps in reverse: the LAST add_middleware call is the
+# outermost layer, so a request passes Prometheus → Logging → CORS → routes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
@@ -121,8 +124,16 @@ app.include_router(proxy_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Global exception handler
+# Global exception handlers. Error details go to the logs, never to the client.
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.exception_handler(RedisError)
+async def redis_unavailable_handler(request: Request, exc: RedisError) -> JSONResponse:
+    # The proxy path fails open on Redis errors; this catches what's left
+    # (admin endpoints that read or write Redis state).
+    logger.error("Redis unavailable", extra={"path": request.url.path, "error": str(exc)})
+    return JSONResponse(status_code=503, content={"error": "Gateway state store unavailable"})
+
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -133,7 +144,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
     return JSONResponse(
         status_code=500,
-        content={"error": "Internal gateway error", "detail": str(exc)},
+        content={"error": "Internal gateway error"},
     )
 
 
@@ -150,4 +161,5 @@ if __name__ == "__main__":
         port=settings.gateway.port,
         reload=settings.gateway.debug,
         log_config=None,  # We handle logging ourselves
+        proxy_headers=False,  # never trust client-sent X-Forwarded-For (same as the Dockerfile)
     )
