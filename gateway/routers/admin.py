@@ -4,10 +4,12 @@ Admin / observability endpoints.
   GET  /admin/metrics
   GET  /admin/routes
   GET  /admin/circuit-breakers
+  POST /admin/circuit-breakers/reset
   POST /admin/circuit-breakers/{service}/reset
   GET  /admin/rate-limit/{ip}
   POST /admin/rate-limit/{ip}/reset
   POST /admin/rate-limit/{ip}/ban
+  DELETE /admin/rate-limit/{ip}/ban
   POST /admin/cache/invalidate
   POST /auth/token
 """
@@ -136,15 +138,15 @@ async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> dict
     return {"status": "all circuits reset"}
 
 
-@router.post("/admin/circuit-breakers/{service_key}/reset", tags=["Admin"])
+@router.post("/admin/circuit-breakers/{service_key:path}/reset", tags=["Admin"])
 async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    # service_key is URL-encoded target
-    import urllib.parse
-    target = urllib.parse.unquote(service_key)
+    # service_key is the URL-encoded target. The server decodes %2F to "/"
+    # before routing, so it needs the :path converter: a plain {service_key}
+    # can't contain slashes, and every target URL has them.
     registry = CircuitBreakerRegistry(redis)
-    cb = registry.get(target)
+    cb = registry.get(service_key)
     await cb.reset()
-    return {"status": "reset", "service": target}
+    return {"status": "reset", "service": service_key}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,6 +175,13 @@ async def ban_ip(
     rl = RateLimiter(redis)
     await rl.ban(ip, duration)
     return {"status": "banned", "ip": ip, "duration_seconds": duration}
+
+
+@router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"])
+async def unban_ip(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
+    rl = RateLimiter(redis)
+    was_banned = await rl.unban(ip)
+    return {"status": "unbanned" if was_banned else "not banned", "ip": ip}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
