@@ -7,7 +7,7 @@ Redis, so any number of gateway replicas behave as one.
 
 It runs on a self-managed single-node **k3s** cluster on a Hetzner VPS. GitHub
 Actions tests every change and publishes the images to GHCR, and
-**Prometheus + Grafana** track traffic, errors, latency and breaker state.
+**Prometheus + Grafana** track traffic, errors, latency and breaker state. Soon ingress and TLS will be added(working on It)
 
 ```mermaid
 flowchart LR
