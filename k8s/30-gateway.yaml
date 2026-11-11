@@ -21,6 +21,14 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
+      # The gateway never calls the Kubernetes API, so it gets no token for it
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001                # the user the image creates
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: gateway
           image: ghcr.io/dimitriosdalaklidhs/api-gateway:gateway
@@ -38,6 +46,18 @@ spec:
                 secretKeyRef:
                   name: gateway-secret
                   key: JWT_SECRET_KEY
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secret
+                  key: REDIS_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Nothing is written inside the container: the ConfigMap turns the
+            # log file off and logs go to stdout
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             # subPath mounts a single file instead of clobbering /app.
             # Trade-off: subPath mounts do NOT hot-reload on ConfigMap change.

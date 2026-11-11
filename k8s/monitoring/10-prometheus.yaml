@@ -79,6 +79,7 @@ data:
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -98,9 +99,23 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      securityContext:
+        # The image runs as "nobody", but by name, and runAsNonRoot can only
+        # verify a number. 65534 is that user.
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: prometheus
           image: prom/prometheus:v3.14.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true    # the TSDB is in the emptyDir at /prometheus
+            capabilities:
+              drop: ["ALL"]
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus

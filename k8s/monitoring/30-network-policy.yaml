@@ -1,0 +1,34 @@
+# ── Network policies for the monitoring namespace ───────────────────────────
+# Neither Prometheus nor Grafana has a reason to accept connections from the
+# rest of the cluster. Grafana is reached with `kubectl port-forward`, which a
+# NetworkPolicy does not block, so it needs no rule of its own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Grafana queries Prometheus; nothing else needs to
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-allow-grafana
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - protocol: TCP
+          port: 9090
