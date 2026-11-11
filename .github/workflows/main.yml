@@ -33,7 +33,7 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r gateway/requirements.txt
+        run: pip install -r gateway/requirements-dev.txt
 
       - name: Lint with ruff
         run: |
@@ -47,4 +47,4 @@ jobs:
           JWT_SECRET_KEY: ci-test-secret
         run: |
           cd gateway
-          PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
+          pytest tests/ -v
