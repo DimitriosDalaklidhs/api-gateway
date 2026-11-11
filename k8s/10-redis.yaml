@@ -1,7 +1,8 @@
 # ── Redis: PVC + Deployment + Service ────────────────────────────────────────
-# NOTE: your compose runs redis with `--save ""` (persistence OFF). That is
-# arguably correct for a rate-limiter/cache. Here it is ON (appendonly) so the
-# PVC actually does something. See README "The Redis persistence question".
+# Compose runs Redis with persistence off (`--save ""`), which is all rate-limit
+# counters and a cache need. Here AOF is on so the PVC has something to hold;
+# losing the data costs one window and a cold cache (README, Kubernetes design
+# notes).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -1,4 +1,4 @@
-# ── API Gateway: Deployment (3 replicas) + Service ───────────────────────────
+# ── API Gateway: Deployment (2 replicas) + Service ───────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
