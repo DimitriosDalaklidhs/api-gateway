@@ -1,5 +1,5 @@
 """
-Phase 5 — Circuit Breaker (Redis-backed).
+Circuit breaker (Redis-backed).
 
 States:
   CLOSED    → normal traffic flows through

@@ -1,7 +1,9 @@
 """
-Phase 2 — Request/Response logging middleware.
+Request/response logging middleware.
 
-Logs: method, path, status, latency, client IP, request ID.
+Logs: method, path, status, latency, client IP, request ID. Also assigns the
+request ID and answers any error the routes let escape, so that response
+carries the ID too.
 """
 
 import logging

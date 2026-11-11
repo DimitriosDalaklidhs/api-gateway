@@ -1,5 +1,5 @@
 """
-Phase 3 — Redis-backed rate limiter.
+Redis-backed rate limiter.
 
 Algorithm: fixed-window counter per client IP and route. The first request in a
 window creates the counter with a TTL of window_seconds, and the window resets

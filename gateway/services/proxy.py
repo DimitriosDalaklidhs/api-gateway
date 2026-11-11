@@ -1,5 +1,5 @@
 """
-Phase 1 + 4 — Async Proxy with Retry Logic.
+Async proxy with retry logic.
 
 Forwards requests to downstream services using httpx.
 Implements exponential-backoff retries on timeout or 5xx responses, for
