@@ -733,6 +733,50 @@ class TestAuth:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Redis Client Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRedisClient:
+
+    @pytest.mark.asyncio
+    async def test_unreachable_redis_is_left_alone_for_the_cooldown(self):
+        # A Redis that hangs made every command wait out its timeout, several
+        # per request. After one failure the rest must fail without waiting.
+        import redis.asyncio as aioredis
+        from core.redis_client import FailFastRedis
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+
+        client = FailFastRedis()  # connects only when a command runs, and none reaches the socket here
+        real_call = AsyncMock(side_effect=[RedisTimeoutError("timed out"), "PONG"])
+        with patch.object(aioredis.Redis, "execute_command", new=real_call):
+            with pytest.raises(RedisTimeoutError):
+                await client.ping()                 # the real attempt, which times out
+            with pytest.raises(RedisConnectionError):
+                await client.ping()                 # cooling down: Redis isn't asked
+            assert real_call.await_count == 1
+            assert client._down_until > time.monotonic()
+
+            client._down_until = 0.0                # the cooldown has passed
+            assert await client.ping() == "PONG"    # tried again, and it's back
+        assert real_call.await_count == 2
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_redis_error_reply_does_not_start_the_cooldown(self):
+        # Redis answered, so it is reachable; only the command was wrong
+        import redis.asyncio as aioredis
+        from core.redis_client import FailFastRedis
+        from redis.exceptions import ResponseError
+
+        client = FailFastRedis()
+        with patch.object(aioredis.Redis, "execute_command", new=AsyncMock(side_effect=ResponseError("WRONGTYPE"))):
+            with pytest.raises(ResponseError):
+                await client.get("some-key")
+        assert client._down_until == 0.0
+        await client.aclose()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Integration Smoke Tests
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -740,6 +784,25 @@ class TestIntegration:
 
     def setup_method(self):
         pass
+
+    def test_probes_answer_200_when_redis_is_down(self):
+        # Liveness never asks Redis. Readiness does, and reports it, but a
+        # gateway that fails open is still ready: a 5xx here would pull every
+        # pod out of rotation over an outage they can all serve through.
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = _down_redis
+        with TestClient(app) as client:
+            live = client.get("/admin/live")
+            health = client.get("/admin/health")
+        app.dependency_overrides.clear()
+
+        assert live.status_code == 200
+        assert live.json() == {"status": "alive"}
+        assert health.status_code == 200
+        assert health.json()["status"] == "degraded"
+        assert health.json()["redis"] == "unreachable"
 
     def test_health_endpoint(self):
         from core.redis_client import get_redis

@@ -85,7 +85,7 @@ app.add_middleware(LoggingMiddleware)
 
 # HTTP metrics (request count, latency, sizes) for Prometheus, served at /metrics.
 # Probes and scrapes are excluded so they don't drown out real traffic.
-Instrumentator(excluded_handlers=["/metrics", "/admin/health"]).instrument(app)
+Instrumentator(excluded_handlers=["/metrics", "/admin/health", "/admin/live"]).instrument(app)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Routers — admin and metrics first so they are NOT caught by the proxy wildcard

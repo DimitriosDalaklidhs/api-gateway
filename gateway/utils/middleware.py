@@ -19,8 +19,8 @@ from utils.errors import error_response
 
 logger = logging.getLogger("gateway.middleware")
 
-# Admin / health paths to skip verbose logging
-_QUIET_PATHS = {"/admin/health", "/favicon.ico"}
+# Probe paths to skip verbose logging
+_QUIET_PATHS = {"/admin/live", "/admin/health", "/favicon.ico"}
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):

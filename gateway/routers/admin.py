@@ -1,5 +1,6 @@
 """
 Admin / observability endpoints.
+  GET  /admin/live
   GET  /admin/health
   GET  /admin/metrics
   GET  /admin/routes
@@ -66,8 +67,22 @@ async def get_token(body: TokenRequest) -> TokenResponse:
 # Health
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/admin/live", tags=["Admin"])
+async def live() -> dict[str, str]:
+    """
+    Liveness. Answers whenever the process can serve a request and touches
+    nothing else: a failed liveness probe restarts the pod, and a restart
+    fixes nothing that is wrong with Redis.
+    """
+    return {"status": "alive"}
+
+
 @router.get("/admin/health", tags=["Admin"])
 async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
+    """
+    Readiness and status. Always 200: the gateway serves traffic without Redis
+    (it fails open), so "degraded" must not take the pod out of rotation.
+    """
     try:
         await redis.ping()
         redis_status = "ok"

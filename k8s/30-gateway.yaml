@@ -46,6 +46,8 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+          # Returns 200 even when Redis is unreachable ("degraded"): the gateway
+          # fails open, so a Redis outage must not empty the Service.
           readinessProbe:
             httpGet:
               path: /admin/health
@@ -54,9 +56,12 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+          # Liveness has its own endpoint that touches nothing but the process.
+          # /admin/health pings Redis; as a liveness check it would have healthy
+          # pods restarted whenever Redis is slow to answer.
           livenessProbe:
             httpGet:
-              path: /admin/health
+              path: /admin/live
               port: http
             initialDelaySeconds: 20
             periodSeconds: 10
