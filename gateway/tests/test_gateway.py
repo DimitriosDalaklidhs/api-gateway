@@ -55,8 +55,10 @@ def _mock_request(method: str = "GET", raw_path: str = "/mock/echo", query: str 
     return req
 
 
-def _starlette_request(path: str, authorization: str | None = None) -> StarletteRequest:
+def _starlette_request(path: str, authorization: str | None = None, cookie: str | None = None) -> StarletteRequest:
     headers = [(b"authorization", authorization.encode())] if authorization else []
+    if cookie:
+        headers.append((b"cookie", cookie.encode()))
     return StarletteRequest({
         "type": "http", "method": "GET", "scheme": "http", "path": path,
         "query_string": b"", "headers": headers, "server": ("gateway", 8000),
@@ -627,6 +629,41 @@ class TestCache:
         alice_again = _cache_key(_starlette_request("/users/me", "Bearer alice-token"))
         assert alice != bob
         assert alice == alice_again
+        # A cookie identifies a caller as much as an Authorization header does
+        anonymous = _cache_key(_starlette_request("/shop/cart"))
+        with_session = _cache_key(_starlette_request("/shop/cart", cookie="session=alice"))
+        assert anonymous != with_session
+
+    @pytest.mark.asyncio
+    async def test_binary_body_survives_the_cache(self, mock_redis):
+        # Stored as text, a body that wasn't UTF-8 came back corrupted and
+        # longer than its Content-Length
+        from fastapi.responses import Response
+        from services.cache import CacheService
+        cache = CacheService(mock_redis)
+        request = _starlette_request("/public/cache-test-binary")
+        body = bytes(range(256))
+        await cache.set(request, Response(content=body, media_type="image/png"))
+        hit = await cache.get(request)
+        assert hit.body == body
+        assert hit.headers["content-length"] == str(len(body))
+        assert hit.headers["content-type"] == "image/png"
+        assert hit.headers["x-cache"] == "HIT"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("headers", [
+        {"set-cookie": "session=abc"},
+        {"cache-control": "private, max-age=60"},
+        {"cache-control": "no-store"},
+    ])
+    async def test_responses_not_for_sharing_are_not_stored(self, mock_redis, headers):
+        # One visitor's session cookie used to be replayed to the next
+        from fastapi.responses import Response
+        from services.cache import CacheService
+        cache = CacheService(mock_redis)
+        request = _starlette_request(f"/public/cache-test-{uuid.uuid4()}")
+        await cache.set(request, Response(content=b"{}", headers=headers))
+        assert await cache.get(request) is None
 
     @pytest.mark.asyncio
     async def test_invalidate_by_path_pattern(self, mock_redis):
@@ -792,6 +829,27 @@ class TestIntegration:
         assert supplied.headers["x-request-id"] == "trace-abc"
         # A generated ID is the same one the client gets back
         assert sent_generated.get_list("x-request-id") == [generated.headers["x-request-id"]]
+
+    def test_cache_hit_keeps_the_gateway_headers(self, mock_redis):
+        # A hit used to return early, without the rate-limit and timing headers
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        upstream = HttpxResponse(200, content=b'{"n":1}', headers={"content-type": "application/json"})
+        downstream = AsyncMock(return_value=upstream)
+        with patch("httpx.AsyncClient.request", new=downstream), TestClient(app) as client:
+            miss = client.get("/mock/cache-headers")
+            hit = client.get("/mock/cache-headers")
+        app.dependency_overrides.clear()
+
+        assert downstream.await_count == 1
+        assert hit.headers["x-cache"] == "HIT"
+        assert hit.json() == {"n": 1}
+        assert "x-response-time-ms" in hit.headers
+        assert hit.headers["x-request-id"] != miss.headers["x-request-id"]
+        # ...and the hit was counted
+        assert int(hit.headers["x-ratelimit-remaining"]) == int(miss.headers["x-ratelimit-remaining"]) - 1
 
     def test_metrics_exposes_http_and_breaker_metrics(self):
         from core.redis_client import get_redis

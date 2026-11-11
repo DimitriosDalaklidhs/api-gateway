@@ -105,25 +105,17 @@ async def gateway_proxy(
             },
         )
 
-    # ── Cache (GET only) ────────────────────────────────────────────────
+    # ── Cache, then the upstream ────────────────────────────────────────
     cache = CacheService(redis)
-    cached = await cache.get(request)
-    if cached is not None:
-        cached.headers["X-Request-ID"] = request_id
-        return cached
-
-    # ── Circuit breaker ─────────────────────────────────────────────────
-    cb = CircuitBreaker(redis, route.target)
-
-    # ── Proxy ───────────────────────────────────────────────────────────
-    proxy = ProxyService(route=route, circuit_breaker=cb)
-    response = await proxy.forward(request, request_id)
-
-    # ── Cache successful GET responses ──────────────────────────────────
-    if request.method == "GET" and response.status_code < 400:
+    response = await cache.get(request)
+    if response is None:
+        proxy = ProxyService(route=route, circuit_breaker=CircuitBreaker(redis, route.target))
+        response = await proxy.forward(request, request_id)
+        # CacheService decides whether the method, status and headers allow it
         await cache.set(request, response)
 
     # ── Response headers ────────────────────────────────────────────────
+    # The same on a cache hit as on a miss: a hit counts against the limit too
     remaining = await rl.remaining(client_ip, route.rate_limit, route.path)
     response.headers["X-RateLimit-Limit"] = str(limit)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
