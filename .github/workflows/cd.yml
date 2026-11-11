@@ -59,3 +59,33 @@ jobs:
             -t $IMAGE:mock -t $IMAGE:mock-${SHA::7} \
             -f gateway/Dockerfile.mock gateway/
           docker push --all-tags $IMAGE
+
+  deploy:
+    name: Deploy to the cluster
+    needs: publish
+    runs-on: ubuntu-latest
+    # Off until the repository variable DEPLOY_ENABLED is set to "true" and the
+    # three DEPLOY_* secrets exist (README, "Automatic deploys").
+    if: vars.DEPLOY_ENABLED == 'true'
+    # This job only opens an SSH connection, so its token gets no permissions
+    permissions: {}
+
+    steps:
+      # The key in DEPLOY_SSH_KEY is tied on the server to one command,
+      # scripts/deploy.sh, and whatever is sent here reaches that script as its
+      # argument. The script moves both Deployments to this commit's SHA tags,
+      # waits for the new pods to become ready and rolls back if they don't,
+      # which fails this job.
+      - name: Roll the cluster to this commit's images
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TARGET: ${{ secrets.DEPLOY_TARGET }}           # user@host
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}   # the server's host key, so it can't be impersonated
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$TARGET" "${SHA::7}"
