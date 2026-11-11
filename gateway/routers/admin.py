@@ -40,8 +40,9 @@ _START_TIME = time.time()
 @router.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
 async def get_token(body: TokenRequest) -> TokenResponse:
     """
-    Issue a JWT. In production, validate credentials against a user store.
-    This demo accepts any username/password.
+    Issue a JWT. Demo only: any username and password are accepted, and the
+    caller picks its own roles. A real deployment would check both against a
+    user store before signing anything.
     """
     token = create_token(
         subject=body.username,

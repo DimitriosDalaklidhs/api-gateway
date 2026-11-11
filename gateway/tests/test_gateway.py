@@ -612,6 +612,18 @@ class TestAuth:
         with pytest.raises(HTTPException) as exc_info:
             decode_token("not.a.valid.token")
         assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "Invalid token"  # the reason stays in the log
+
+    def test_token_without_expiry_is_rejected(self):
+        # PyJWT only checks exp when the claim is present, so it has to be required
+        import jwt
+        from core.config import settings
+        from fastapi import HTTPException
+        from services.auth import decode_token
+        token = jwt.encode({"sub": "alice"}, settings.jwt.secret_key, algorithm=settings.jwt.algorithm)
+        with pytest.raises(HTTPException) as exc_info:
+            decode_token(token)
+        assert exc_info.value.status_code == 401
 
 
 # ══════════════════════════════════════════════════════════════════════════════
