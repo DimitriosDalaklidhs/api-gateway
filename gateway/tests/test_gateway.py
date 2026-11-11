@@ -733,6 +733,36 @@ class TestAuth:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Config Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestConfig:
+
+    def test_redis_password_comes_from_the_environment(self):
+        # Under Kubernetes it lives in a Secret, not in the ConfigMap
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {"REDIS_PASSWORD": "from-the-secret"}):
+            assert load_settings().redis.password == "from-the-secret"
+
+    def test_redis_password_survives_the_url(self):
+        # Unquoted, the "@" would end the credentials and the rest become the host
+        import redis.asyncio as aioredis
+        from core.config import RedisConfig
+        password = "p@ss:w/rd#1"
+        url = RedisConfig(host="redis", password=password).url
+        parsed = aioredis.ConnectionPool.from_url(url).connection_kwargs
+        assert parsed["password"] == password
+        assert parsed["host"] == "redis"
+
+    def test_log_file_can_be_turned_off(self):
+        # The Kubernetes ConfigMap sets logging.file to null: stdout only
+        from core.config import Settings
+        assert Settings(logging={"file": None}).logging.file is None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Redis Client Tests
 # ══════════════════════════════════════════════════════════════════════════════
 

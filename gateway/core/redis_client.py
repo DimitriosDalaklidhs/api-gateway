@@ -71,7 +71,8 @@ async def get_redis() -> aioredis.Redis:
             # either way, so a second wait buys nothing
             retry_on_timeout=False,
         )
-        logger.info("Redis pool initialised", extra={"url": settings.redis.url})
+        # Host and port, not the URL: the URL carries the password
+        logger.info("Redis pool initialised", extra={"host": settings.redis.host, "port": settings.redis.port})
     return _pool
 
 

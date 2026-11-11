@@ -1,6 +1,6 @@
 """
 Structured logging configuration.
-Outputs JSON logs to stdout + rotating file.
+Outputs JSON logs to stdout, and to a rotating file when logging.file is set.
 
 Importing this module installs the handlers (main.py does that). Every record
 logged while a request is in flight gets that request's ID, including records
@@ -70,10 +70,6 @@ def setup_logging() -> logging.Logger:
     log_cfg = settings.logging
     log_level = getattr(logging, log_cfg.level.upper(), logging.INFO)
 
-    # Ensure log directory exists
-    log_path = Path(log_cfg.file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
     root = logging.getLogger()
     root.setLevel(log_level)
 
@@ -88,15 +84,17 @@ def setup_logging() -> logging.Logger:
     console.addFilter(request_ids)
     root.addHandler(console)
 
-    # Rotating file handler
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_cfg.file,
-        maxBytes=log_cfg.max_bytes,
-        backupCount=log_cfg.backup_count,
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.addFilter(request_ids)
-    root.addHandler(file_handler)
+    # Rotating file handler, unless the config turns it off (logging.file: null)
+    if log_cfg.file:
+        Path(log_cfg.file).parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_cfg.file,
+            maxBytes=log_cfg.max_bytes,
+            backupCount=log_cfg.backup_count,
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(request_ids)
+        root.addHandler(file_handler)
 
     # Quieten noisy third-party loggers
     for noisy in ("httpx", "httpcore", "uvicorn.access"):

@@ -6,6 +6,7 @@ Loads from YAML file and environment variables.
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import yaml
 from pydantic import BaseModel, Field
@@ -20,7 +21,9 @@ class RedisConfig(BaseModel):
     @property
     def url(self) -> str:
         if self.password:
-            return f"redis://:{self.password}@{self.host}:{self.port}/{self.db}"
+            # Quoted, because a password may contain "@", ":" or "/", and any
+            # of them would end the credentials part of the URL early
+            return f"redis://:{quote(self.password, safe='')}@{self.host}:{self.port}/{self.db}"
         return f"redis://{self.host}:{self.port}/{self.db}"
 
 
@@ -67,7 +70,9 @@ class JWTConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
-    file: str = "logs/gateway.log"
+    # null logs to stdout only, which is what a container wants: the runtime
+    # collects stdout, and the root filesystem can stay read-only
+    file: str | None = "logs/gateway.log"
     max_bytes: int = 10_485_760
     backup_count: int = 5
 
@@ -117,6 +122,8 @@ def load_settings(config_path: str = "config.yaml") -> Settings:
         data.setdefault("redis", {})["host"] = redis_host
     if redis_port := os.getenv("REDIS_PORT"):
         data.setdefault("redis", {})["port"] = int(redis_port)
+    if redis_password := os.getenv("REDIS_PASSWORD"):
+        data.setdefault("redis", {})["password"] = redis_password
     if jwt_secret := os.getenv("JWT_SECRET_KEY"):
         data.setdefault("jwt", {})["secret_key"] = jwt_secret
 
