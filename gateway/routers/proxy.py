@@ -24,17 +24,19 @@ router = APIRouter()
 
 def _match_route(path: str) -> RouteConfig | None:
     """
-    Longest-prefix match.
-    e.g. /users/123 matches the /users route.
+    Longest-prefix match on whole segments.
+    e.g. /users/123 matches the /users route; /usersX does not.
     """
     best: RouteConfig | None = None
-    best_len = -1
     for route in settings.routes:
-        if path == route.path or path.startswith(route.path + "/") or path.startswith(route.path + "?"):
-            if len(route.path) > best_len:
+        if path == route.path or path.startswith(route.path + "/"):
+            if best is None or len(route.path) > len(best.path):
                 best = route
-                best_len = len(route.path)
     return best
+
+
+def _has_dot_segment(path: str) -> bool:
+    return any(segment in (".", "..") for segment in path.split("/"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,10 +58,20 @@ async def gateway_proxy(
     client_ip = request.state.client_ip
     start = time.perf_counter()
 
+    # The server has percent-decoded this already, so "%2e%2e" arrives as ".."
+    path = request.scope["path"]
+
+    # ── Path hygiene ────────────────────────────────────────────────────
+    # A route's limit, methods and auth are chosen from the path as sent, but
+    # an HTTP client collapses "/users/../orders" to "/orders" before sending
+    # it upstream. Refused here, or one route's policy guards another's resource.
+    if _has_dot_segment(path):
+        return error_response(400, "Path must not contain '.' or '..' segments")
+
     # ── Route matching ──────────────────────────────────────────────────
-    route = _match_route(request.url.path)
+    route = _match_route(path)
     if not route:
-        return error_response(404, f"No route configured for {request.url.path}")
+        return error_response(404, f"No route configured for {path}")
 
     # ── Method check ────────────────────────────────────────────────────
     if request.method not in route.methods:

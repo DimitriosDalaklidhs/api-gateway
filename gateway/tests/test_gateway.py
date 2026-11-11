@@ -16,6 +16,7 @@ import fnmatch
 import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,12 +45,11 @@ def _down_redis():
     return DownRedis()
 
 
-def _mock_request(method: str = "GET"):
+def _mock_request(method: str = "GET", raw_path: str = "/mock/echo", query: str = "", headers: dict | None = None):
     req = MagicMock()
     req.method = method
-    req.url.path = "/mock/echo"
-    req.url.query = ""
-    req.headers = {}
+    req.scope = {"path": unquote(raw_path), "raw_path": raw_path.encode(), "query_string": query.encode()}
+    req.headers = headers or {}
     req.client.host = "127.0.0.1"
     req.body = AsyncMock(return_value=b"")
     return req
@@ -395,13 +395,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         fake_response = HttpxResponse(
             200,
@@ -422,13 +416,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         call_count = 0
 
@@ -454,13 +442,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         with patch("httpx.AsyncClient.request", new=AsyncMock(side_effect=httpx.TimeoutException("timeout"))):
             with patch("asyncio.sleep", new=AsyncMock()):
@@ -476,13 +458,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {"x-forwarded-for": "6.6.6.6"}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request(headers={"x-forwarded-for": "6.6.6.6"})
 
         downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
         with patch("httpx.AsyncClient.request", new=downstream):
@@ -565,6 +541,61 @@ class TestProxy:
         assert resp.body == body
         assert "content-encoding" not in resp.headers
         assert resp.headers["content-length"] == str(len(body))
+
+    @pytest.mark.asyncio
+    async def test_forwards_the_path_as_sent(self):
+        # Decoding "%2F" and "%3F" and re-encoding them would turn them into a
+        # real path separator and a query delimiter upstream
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010", strip_prefix=True))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            await proxy.forward(_mock_request(raw_path="/mock/a%2Fb%3Fc", query="x=%2F1"), "raw-path")
+        assert str(downstream.call_args.kwargs["url"]) == "http://localhost:8010/a%2Fb%3Fc?x=%2F1"
+
+    @pytest.mark.asyncio
+    async def test_encoded_route_prefix_is_refused(self):
+        # "/%6dock" decodes to "/mock" and matches the route, but stripping
+        # five characters from the raw path would cut it in the wrong place
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010", strip_prefix=True))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            resp = await proxy.forward(_mock_request(raw_path="/%6dock/echo"), "encoded-prefix")
+        assert resp.status_code == 400
+        downstream.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_client_accept_encoding_is_not_forwarded(self):
+        # httpx can't decode br here; an upstream that answered in it would
+        # have its body passed on compressed with the header already removed
+        import httpx
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            await proxy.forward(_mock_request(headers={"accept-encoding": "br", "accept": "text/plain"}), "enc")
+        sent = httpx.Headers(downstream.call_args.kwargs["headers"])
+        assert "accept-encoding" not in sent
+        assert sent["accept"] == "text/plain"
+
+    @pytest.mark.asyncio
+    async def test_repeated_upstream_headers_survive(self):
+        # A dict of headers kept one Set-Cookie and joined the rest into it
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        upstream = HttpxResponse(200, content=b"{}", headers=[("set-cookie", "a=1"), ("set-cookie", "b=2")])
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        with patch("httpx.AsyncClient.request", new=AsyncMock(return_value=upstream)):
+            resp = await proxy.forward(_mock_request(), "cookies")
+        assert resp.headers.getlist("set-cookie") == ["a=1", "b=2"]
 
     @pytest.mark.asyncio
     async def test_open_circuit_response_hides_the_target(self, mock_redis):
@@ -697,6 +728,21 @@ class TestIntegration:
         # The path goes through the JSON encoder: a quote in it used to break the body
         assert quoted.json() == {"error": 'No route configured for /a"b'}
         app.dependency_overrides.clear()
+
+    def test_dot_segments_are_refused(self):
+        # /users/../orders would be limited and authorised as /users, then
+        # collapsed to /orders by the HTTP client on its way upstream
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: AsyncMock()
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream), TestClient(app) as client:
+            resp = client.get("/users/%2e%2e/orders")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 400
+        downstream.assert_not_awaited()
 
     def test_unhandled_error_keeps_the_request_id(self):
         # Starlette's own 500 handler runs outside the logging middleware and
