@@ -21,17 +21,25 @@ from typing import Any
 import redis.asyncio as aioredis
 from core.config import settings
 from core.redis_client import get_redis
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from models.schemas import TokenRequest, TokenResponse
 from services.auth import create_token
 from services.cache import CacheService
 from services.circuit_breaker import CircuitBreaker
 from services.rate_limiter import RateLimiter
+from utils.errors import error_response
 
 logger = logging.getLogger("gateway.router.admin")
 
 router = APIRouter()
 _START_TIME = time.time()
+
+
+def _targets() -> list[str]:
+    """Each downstream once. Breakers are per target, and several routes can share one."""
+    return sorted({route.target for route in settings.routes})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth
@@ -80,7 +88,7 @@ async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
 
 @router.get("/admin/metrics", tags=["Admin"])
 async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    circuit_statuses = [await CircuitBreaker(redis, route.target).status() for route in settings.routes]
+    circuit_statuses = [await CircuitBreaker(redis, target).status() for target in _targets()]
 
     return {
         "uptime_seconds": round(time.time() - _START_TIME, 1),
@@ -89,7 +97,7 @@ async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
                 "path": r.path,
                 "target": r.target,
                 "methods": r.methods,
-                "rate_limit": r.rate_limit,
+                "rate_limit": r.rate_limit if r.rate_limit is not None else settings.rate_limiting.default_limit,
                 "auth_required": r.auth_required,
             }
             for r in settings.routes
@@ -118,21 +126,26 @@ async def list_routes() -> list[dict[str, Any]]:
 
 @router.get("/admin/circuit-breakers", tags=["Admin"])
 async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> list[dict[str, Any]]:
-    return [await CircuitBreaker(redis, route.target).status() for route in settings.routes]
+    return [await CircuitBreaker(redis, target).status() for target in _targets()]
 
 
 @router.post("/admin/circuit-breakers/reset", tags=["Admin"])
 async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    for route in settings.routes:
-        await CircuitBreaker(redis, route.target).reset()
+    for target in _targets():
+        await CircuitBreaker(redis, target).reset()
     return {"status": "all circuits reset"}
 
 
-@router.post("/admin/circuit-breakers/{service_key:path}/reset", tags=["Admin"])
-async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
+# response_model=None: the return type is a union with a Response, which
+# FastAPI can't turn into a response schema
+@router.post("/admin/circuit-breakers/{service_key:path}/reset", tags=["Admin"], response_model=None)
+async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> JSONResponse | dict[str, str]:
     # service_key is the URL-encoded target. The server decodes %2F to "/"
     # before routing, so it needs the :path converter: a plain {service_key}
     # can't contain slashes, and every target URL has them.
+    if service_key not in _targets():
+        # Resetting writes a state key, so an unknown name would leave one behind
+        return error_response(404, "No route uses that target")
     await CircuitBreaker(redis, service_key).reset()
     return {"status": "reset", "service": service_key}
 
@@ -157,12 +170,12 @@ async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) 
 @router.post("/admin/rate-limit/{ip}/ban", tags=["Admin"])
 async def ban_ip(
     ip: str,
-    duration: int = 300,
+    duration: int | None = Query(None, ge=1, description="Seconds. Defaults to rate_limiting.ban_duration_seconds."),
     redis: aioredis.Redis = Depends(get_redis),
 ) -> dict[str, Any]:
     rl = RateLimiter(redis)
-    await rl.ban(ip, duration)
-    return {"status": "banned", "ip": ip, "duration_seconds": duration}
+    used = await rl.ban(ip, duration)
+    return {"status": "banned", "ip": ip, "duration_seconds": used}
 
 
 @router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"])

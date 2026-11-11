@@ -46,8 +46,13 @@ REDIS_UP = Gauge(
 
 async def _refresh_gauges(redis: aioredis.Redis) -> None:
     try:
+        # One read per downstream; routes that share a target share its breaker
+        statuses = {
+            target: await CircuitBreaker(redis, target).status()
+            for target in {route.target for route in settings.routes}
+        }
         for route in settings.routes:
-            status = await CircuitBreaker(redis, route.target).status()
+            status = statuses[route.target]
             labels = {"route": route.path, "target": route.target}
             CIRCUIT_STATE.labels(**labels).set(STATE_VALUE[CircuitState(status["state"])])
             CIRCUIT_FAILURES.labels(**labels).set(status["failures"])

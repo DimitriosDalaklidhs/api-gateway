@@ -245,6 +245,28 @@ class TestRateLimiter:
         assert not await rl.unban(ip)  # nothing left to lift
 
     @pytest.mark.asyncio
+    async def test_route_without_a_limit_gets_the_default(self, mock_redis):
+        # RouteConfig used to default rate_limit to 100, so default_limit never applied
+        from core.config import RouteConfig, settings
+        from services.rate_limiter import RateLimiter
+        route = RouteConfig(path="/no-limit", target="http://t")
+        assert route.rate_limit is None
+        with patch.object(settings.rate_limiting, "default_limit", 7):
+            _, _, limit = await RateLimiter(mock_redis).check("11.0.0.7", route.rate_limit, route.path)
+        assert limit == 7
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_the_time_left_in_the_window(self, mock_redis):
+        from core.config import settings
+        from services.rate_limiter import RateLimiter
+        rl = RateLimiter(mock_redis)
+        await rl.check("11.0.0.5", route_limit=1, route="/mock")
+        await mock_redis.expire(rl._key("11.0.0.5", "/mock"), 17)  # the fake doesn't run the script's EXPIRE
+        assert await rl.retry_after("11.0.0.5", "/mock") == 17
+        # No counter (or Redis can't say): the whole window
+        assert await rl.retry_after("11.0.0.6", "/mock") == settings.rate_limiting.window_seconds
+
+    @pytest.mark.asyncio
     async def test_fails_open_when_redis_is_down(self):
         from services.rate_limiter import RateLimiter
         rl = RateLimiter(_down_redis())
@@ -930,6 +952,34 @@ class TestIntegration:
             assert client.delete("/admin/rate-limit/12.0.0.1/ban").json()["status"] == "unbanned"
             assert client.get("/admin/rate-limit/12.0.0.1").json()["banned"] is False
         app.dependency_overrides.clear()
+
+    def test_ban_without_a_duration_uses_the_configured_one(self, mock_redis):
+        # The endpoint's own default of 300 used to shadow ban_duration_seconds
+        from core.config import settings
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with patch.object(settings.rate_limiting, "ban_duration_seconds", 42), TestClient(app) as client:
+            resp = client.post("/admin/rate-limit/12.0.0.2/ban")
+        app.dependency_overrides.clear()
+
+        assert resp.json()["duration_seconds"] == 42
+
+    def test_breakers_are_listed_once_per_target(self, mock_redis):
+        # Three routes share mock-service, so they share one breaker
+        from core.config import settings
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with TestClient(app) as client:
+            listed = client.get("/admin/circuit-breakers").json()
+            unknown = client.post("/admin/circuit-breakers/http%3A%2F%2Fno-such-service/reset")
+        app.dependency_overrides.clear()
+
+        assert sorted(b["service"] for b in listed) == sorted({r.target for r in settings.routes})
+        assert unknown.status_code == 404  # a reset writes a key; an unknown name would leave one behind
 
     def test_reset_one_breaker_by_target(self, mock_redis):
         # The target contains slashes; this endpoint used to fall through to a 404

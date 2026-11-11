@@ -13,7 +13,7 @@ redis:
 
 rate_limiting:
   enabled: true
-  default_limit: 100
+  default_limit: 100          # for routes that set no rate_limit of their own
   window_seconds: 60
   ban_duration_seconds: 300
 

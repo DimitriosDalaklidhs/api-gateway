@@ -93,7 +93,7 @@ async def gateway_proxy(
     # /users/1 and /users/2 share the /users limit
     allowed, count, limit = await rl.check(client_ip, route.rate_limit, route.path)
     if not allowed:
-        retry_after = settings.rate_limiting.window_seconds
+        retry_after = await rl.retry_after(client_ip, route.path)
         return error_response(
             429,
             f"Rate limit exceeded ({count}/{limit})",

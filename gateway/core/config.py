@@ -51,7 +51,9 @@ class ProxyConfig(BaseModel):
 class RouteConfig(BaseModel):
     path: str
     target: str
-    rate_limit: int = 100
+    # None means rate_limiting.default_limit. A number as the default here
+    # would shadow that setting for every route.
+    rate_limit: int | None = None
     strip_prefix: bool = False
     methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH"]
     auth_required: bool = False
