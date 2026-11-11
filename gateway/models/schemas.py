@@ -1,8 +1,6 @@
 """
-Shared Pydantic models used across the gateway.
+Request and response models for the gateway's own endpoints.
 """
-
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -11,29 +9,6 @@ class ErrorResponse(BaseModel):
     error: str
     detail: str | None = None
     request_id: str | None = None
-
-
-class HealthResponse(BaseModel):
-    status: str
-    redis: str
-    version: str
-
-
-class RateLimitStats(BaseModel):
-    ip: str
-    count: int
-    limit: int
-    remaining: int
-    reset_in_seconds: int
-    banned: bool
-
-
-class CircuitBreakerStatus(BaseModel):
-    service: str
-    state: str
-    failures: int
-    threshold: int
-    opened_at: float | None = None
 
 
 class TokenRequest(BaseModel):
@@ -46,10 +21,3 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
-
-
-class MetricsSummary(BaseModel):
-    uptime_seconds: float
-    total_requests: int
-    routes: list[dict[str, Any]]
-    circuit_breakers: list[dict[str, Any]]

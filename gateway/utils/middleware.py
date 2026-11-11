@@ -12,7 +12,6 @@ from collections.abc import Callable
 from core.logging import request_id_var
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
 
 logger = logging.getLogger("gateway.middleware")
 
@@ -21,19 +20,15 @@ _QUIET_PATHS = {"/admin/health", "/favicon.ico"}
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
-
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         client_ip = self._get_ip(request)
         path = request.url.path
         start = time.perf_counter()
 
-        # Attach request_id for use in downstream handlers
+        # The proxy router reads both, so logs, downstream and response agree
         request.state.request_id = request_id
         request.state.client_ip = client_ip
-        request.state.start_time = start
 
         # Every log line written while this request is in flight carries its ID
         token = request_id_var.set(request_id)

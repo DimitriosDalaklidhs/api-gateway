@@ -15,7 +15,7 @@ from core.config import settings
 from core.redis_client import get_redis
 from fastapi import APIRouter, Depends, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Gauge, generate_latest
-from services.circuit_breaker import CircuitBreakerRegistry, CircuitState
+from services.circuit_breaker import CircuitBreaker, CircuitState
 
 logger = logging.getLogger("gateway.router.metrics")
 
@@ -45,10 +45,9 @@ REDIS_UP = Gauge(
 
 
 async def _refresh_gauges(redis: aioredis.Redis) -> None:
-    registry = CircuitBreakerRegistry(redis)
     try:
         for route in settings.routes:
-            status = await registry.get(route.target).status()
+            status = await CircuitBreaker(redis, route.target).status()
             labels = {"route": route.path, "target": route.target}
             CIRCUIT_STATE.labels(**labels).set(STATE_VALUE[CircuitState(status["state"])])
             CIRCUIT_FAILURES.labels(**labels).set(status["failures"])

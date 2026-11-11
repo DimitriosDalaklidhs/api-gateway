@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends
 from models.schemas import TokenRequest, TokenResponse
 from services.auth import create_token
 from services.cache import CacheService
-from services.circuit_breaker import CircuitBreakerRegistry
+from services.circuit_breaker import CircuitBreaker
 from services.rate_limiter import RateLimiter
 
 logger = logging.getLogger("gateway.router.admin")
@@ -79,11 +79,7 @@ async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
 
 @router.get("/admin/metrics", tags=["Admin"])
 async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    cb_registry = CircuitBreakerRegistry(redis)
-    circuit_statuses = []
-    for route in settings.routes:
-        cb = cb_registry.get(route.target)
-        circuit_statuses.append(await cb.status())
+    circuit_statuses = [await CircuitBreaker(redis, route.target).status() for route in settings.routes]
 
     return {
         "uptime_seconds": round(time.time() - _START_TIME, 1),
@@ -121,20 +117,13 @@ async def list_routes() -> list[dict[str, Any]]:
 
 @router.get("/admin/circuit-breakers", tags=["Admin"])
 async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> list[dict[str, Any]]:
-    registry = CircuitBreakerRegistry(redis)
-    results = []
-    for route in settings.routes:
-        cb = registry.get(route.target)
-        results.append(await cb.status())
-    return results
+    return [await CircuitBreaker(redis, route.target).status() for route in settings.routes]
 
 
 @router.post("/admin/circuit-breakers/reset", tags=["Admin"])
 async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    registry = CircuitBreakerRegistry(redis)
     for route in settings.routes:
-        cb = registry.get(route.target)
-        await cb.reset()
+        await CircuitBreaker(redis, route.target).reset()
     return {"status": "all circuits reset"}
 
 
@@ -143,9 +132,7 @@ async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_re
     # service_key is the URL-encoded target. The server decodes %2F to "/"
     # before routing, so it needs the :path converter: a plain {service_key}
     # can't contain slashes, and every target URL has them.
-    registry = CircuitBreakerRegistry(redis)
-    cb = registry.get(service_key)
-    await cb.reset()
+    await CircuitBreaker(redis, service_key).reset()
     return {"status": "reset", "service": service_key}
 
 

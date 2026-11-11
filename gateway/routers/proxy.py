@@ -12,7 +12,7 @@ from core.redis_client import get_redis
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from services.auth import require_auth
 from services.cache import CacheService
-from services.circuit_breaker import CircuitBreakerRegistry
+from services.circuit_breaker import CircuitBreaker
 from services.proxy import ProxyService
 from services.rate_limiter import RateLimiter
 
@@ -116,8 +116,7 @@ async def gateway_proxy(
         return cached
 
     # ── Circuit breaker ─────────────────────────────────────────────────
-    cb_registry = CircuitBreakerRegistry(redis)
-    cb = cb_registry.get(route.target)
+    cb = CircuitBreaker(redis, route.target)
 
     # ── Proxy ───────────────────────────────────────────────────────────
     proxy = ProxyService(route=route, circuit_breaker=cb)

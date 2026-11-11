@@ -97,11 +97,6 @@ class Settings(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     caching: CachingConfig = Field(default_factory=CachingConfig)
 
-    @property
-    def route_map(self) -> dict[str, RouteConfig]:
-        """Fast lookup: path prefix → RouteConfig."""
-        return {r.path: r for r in self.routes}
-
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:

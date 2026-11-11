@@ -1,19 +1,8 @@
 """
-API Gateway — entry point.
+API Gateway: application entry point.
 
-Phases implemented:
-  1  Basic Proxy (GET/POST/PUT/DELETE/PATCH + dynamic routing)
-  2  Logging Middleware (JSON structured logs → file + stdout)
-  3  Rate Limiting (Redis fixed-window counter per client IP and route)
-  4  Retries (httpx, exponential backoff, configurable status codes)
-  5  Circuit Breaker (CLOSED/OPEN/HALF-OPEN, Redis state)
-  6  Config System (YAML + env-var overrides)
-Bonus:
-  ✅ JWT Authentication
-  ✅ Request Caching (Redis)
-  ✅ /admin/metrics endpoint
-  ✅ Prometheus /metrics (HTTP metrics + circuit breaker gauges)
-  ✅ Admin control plane (ban IPs, reset circuits, invalidate cache)
+Builds the FastAPI app, wires the middleware and the routers, and owns the
+Redis connection for the lifetime of the process.
 """
 
 import logging
@@ -69,28 +58,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.gateway.title,
     version=settings.gateway.version,
-    description="""
-## High-Performance API Gateway
-
-Built with **FastAPI** + **httpx** + **Redis**.
-
-### Features
-| Feature | Status |
-|---|---|
-| Dynamic proxy routing | ✅ |
-| Rate limiting (Redis) | ✅ |
-| Retry with backoff | ✅ |
-| Circuit breaker | ✅ |
-| JWT authentication | ✅ |
-| Response caching | ✅ |
-| Structured JSON logging | ✅ |
-| Admin control plane | ✅ |
-
-### Quick Start
-1. `POST /auth/token` with `{"username":"x","password":"y"}` to get a JWT
-2. Use the token as `Authorization: Bearer <token>` on protected routes
-3. Watch `/admin/metrics` for live circuit breaker and route stats
-    """,
+    description=(
+        "Reverse-proxy API gateway: path routing, per-route rate limits, retries, "
+        "a circuit breaker per downstream, a response cache and JWT checks. "
+        "The endpoints listed here are the gateway's own; everything else is proxied."
+    ),
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
