@@ -19,6 +19,7 @@ from redis.exceptions import RedisError
 from routers.admin import router as admin_router
 from routers.metrics import router as metrics_router
 from routers.proxy import router as proxy_router
+from utils.errors import error_response
 from utils.middleware import LoggingMiddleware
 
 logger = logging.getLogger("gateway")
@@ -104,20 +105,20 @@ async def redis_unavailable_handler(request: Request, exc: RedisError) -> JSONRe
     # The proxy path fails open on Redis errors; this catches what's left
     # (admin endpoints that read or write Redis state).
     logger.error("Redis unavailable", extra={"path": request.url.path, "error": str(exc)})
-    return JSONResponse(status_code=503, content={"error": "Gateway state store unavailable"})
+    return error_response(503, "Gateway state store unavailable")
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Backstop only. LoggingMiddleware answers errors raised inside it, because
+    # this handler runs outside every middleware: a response built here carries
+    # no request ID and no CORS headers.
     logger.error(
         "Unhandled exception",
         exc_info=True,
         extra={"path": request.url.path},
     )
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal gateway error"},
-    )
+    return error_response(500, "Internal gateway error")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

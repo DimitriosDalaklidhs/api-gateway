@@ -13,6 +13,7 @@ import httpx
 from core.config import RouteConfig, settings
 from fastapi import Request
 from fastapi.responses import Response
+from utils.errors import error_response
 
 from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
 
@@ -111,12 +112,10 @@ class ProxyService:
         if self._cb:
             try:
                 cb_state = await self._cb.before_call()
-            except CircuitBreakerOpen as exc:
-                return Response(
-                    content=f'{{"error": "Service unavailable (circuit open): {exc.service}"}}',
-                    status_code=503,
-                    media_type="application/json",
-                )
+            except CircuitBreakerOpen:
+                # Which downstream it is stays in the breaker's own log line:
+                # the target is an internal hostname the client has no use for
+                return error_response(503, "Service unavailable (circuit open)")
 
         idempotent = request.method.upper() in _IDEMPOTENT_METHODS
         max_attempts = self._cfg.max_attempts
@@ -180,11 +179,7 @@ class ProxyService:
                     "request_id": request_id,
                 },
             )
-            return Response(
-                content=f'{{"error": "Upstream unavailable after {attempts} attempt(s)"}}',
-                status_code=502,
-                media_type="application/json",
-            )
+            return error_response(502, f"Upstream unavailable after {attempts} attempt(s)")
 
         await self._record(cb_state, success=resp.status_code < 500)
 

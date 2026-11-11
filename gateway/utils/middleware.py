@@ -13,6 +13,8 @@ from core.logging import request_id_var
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from utils.errors import error_response
+
 logger = logging.getLogger("gateway.middleware")
 
 # Admin / health paths to skip verbose logging
@@ -66,7 +68,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         try:
             response: Response = await call_next(request)
         except Exception:
-            latency_ms = (time.perf_counter() - start) * 1000
+            # Answered here, not re-raised. Starlette's last-resort handler sits
+            # outside this middleware, so its 500 would reach the client without
+            # the request ID that the log line for this failure carries.
             logger.error(
                 "Unhandled exception",
                 exc_info=True,
@@ -75,11 +79,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
-                    "latency_ms": round(latency_ms, 2),
                     "client_ip": client_ip,
                 },
             )
-            raise
+            response = error_response(500, "Internal gateway error")
 
         latency_ms = (time.perf_counter() - start) * 1000
 

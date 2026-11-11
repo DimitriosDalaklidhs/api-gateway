@@ -15,6 +15,7 @@ from services.cache import CacheService
 from services.circuit_breaker import CircuitBreaker
 from services.proxy import ProxyService
 from services.rate_limiter import RateLimiter
+from utils.errors import error_response
 
 logger = logging.getLogger("gateway.router.proxy")
 
@@ -58,53 +59,37 @@ async def gateway_proxy(
     # ── Route matching ──────────────────────────────────────────────────
     route = _match_route(request.url.path)
     if not route:
-        return Response(
-            content=f'{{"error": "No route configured for {request.url.path}"}}',
-            status_code=404,
-            media_type="application/json",
-        )
+        return error_response(404, f"No route configured for {request.url.path}")
 
     # ── Method check ────────────────────────────────────────────────────
     if request.method not in route.methods:
-        return Response(
-            content=f'{{"error": "Method {request.method} not allowed on {route.path}"}}',
-            status_code=405,
-            media_type="application/json",
-        )
+        return error_response(405, f"Method {request.method} not allowed on {route.path}")
 
     # ── Auth ─────────────────────────────────────────────────────────────
     if route.auth_required:
         try:
             await require_auth(request)
         except HTTPException as exc:
-            return Response(
-                content=f'{{"error": "{exc.detail}"}}',
-                status_code=exc.status_code,
-                media_type="application/json",
-                headers=exc.headers or {},
-            )
+            return error_response(exc.status_code, exc.detail, headers=exc.headers)
 
     # ── Rate limiting ───────────────────────────────────────────────────
     rl = RateLimiter(redis)
     if await rl.is_banned(client_ip):
-        return Response(
-            content='{"error": "IP temporarily banned"}',
-            status_code=429,
-            media_type="application/json",
-        )
+        return error_response(429, "IP temporarily banned")
 
     # Keyed on the route prefix (e.g. "/users"), not the request path, so
     # /users/1 and /users/2 share the /users limit
     allowed, count, limit = await rl.check(client_ip, route.rate_limit, route.path)
     if not allowed:
-        return Response(
-            content=f'{{"error": "Rate limit exceeded ({count}/{limit})","retry_after": {settings.rate_limiting.window_seconds}}}',
-            status_code=429,
-            media_type="application/json",
+        retry_after = settings.rate_limiting.window_seconds
+        return error_response(
+            429,
+            f"Rate limit exceeded ({count}/{limit})",
+            retry_after=retry_after,
             headers={
                 "X-RateLimit-Limit": str(limit),
                 "X-RateLimit-Remaining": "0",
-                "Retry-After": str(settings.rate_limiting.window_seconds),
+                "Retry-After": str(retry_after),
             },
         )
 

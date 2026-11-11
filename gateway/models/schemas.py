@@ -6,9 +6,10 @@ from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
+    """Body of the errors the gateway's own code answers with (utils/errors.py)."""
+
     error: str
-    detail: str | None = None
-    request_id: str | None = None
+    retry_after: int | None = None  # seconds; set on 429
 
 
 class TokenRequest(BaseModel):

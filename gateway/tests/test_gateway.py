@@ -566,6 +566,22 @@ class TestProxy:
         assert "content-encoding" not in resp.headers
         assert resp.headers["content-length"] == str(len(body))
 
+    @pytest.mark.asyncio
+    async def test_open_circuit_response_hides_the_target(self, mock_redis):
+        # The target is an internal hostname; it belongs in the log, not the body
+        from core.config import RouteConfig
+        from services.circuit_breaker import CircuitBreaker, CircuitState
+        from services.proxy import ProxyService
+
+        target = "http://internal-host:9999"
+        cb = CircuitBreaker(mock_redis, target)
+        await cb._set_state(CircuitState.OPEN)
+        await mock_redis.set(cb._key_opened, str(time.time()))
+        proxy = ProxyService(route=RouteConfig(path="/mock", target=target), circuit_breaker=cb)
+        resp = await proxy.forward(_mock_request(), "open-circuit")
+        assert resp.status_code == 503
+        assert b"internal-host" not in resp.body
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cache Tests
@@ -676,8 +692,26 @@ class TestIntegration:
         app.dependency_overrides[get_redis] = override_redis
         with TestClient(app, raise_server_exceptions=False) as client:
             resp = client.get("/nonexistent-path-xyz")
+            quoted = client.get("/a%22b")
         assert resp.status_code == 404
+        # The path goes through the JSON encoder: a quote in it used to break the body
+        assert quoted.json() == {"error": 'No route configured for /a"b'}
         app.dependency_overrides.clear()
+
+    def test_unhandled_error_keeps_the_request_id(self):
+        # Starlette's own 500 handler runs outside the logging middleware and
+        # used to answer without the ID the log line carries
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: AsyncMock()
+        with patch("routers.proxy._match_route", side_effect=RuntimeError("boom")), TestClient(app) as client:
+            resp = client.get("/mock/users", headers={"X-Request-ID": "trace-500"})
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "Internal gateway error"}
+        assert resp.headers["x-request-id"] == "trace-500"
 
     def test_rate_limiter_ignores_spoofed_forwarded_for(self):
         from core.redis_client import get_redis
