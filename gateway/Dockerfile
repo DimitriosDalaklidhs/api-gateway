@@ -2,11 +2,15 @@ FROM python:3.12.14-slim
 
 WORKDIR /app
 
-# System deps. curl is for the Compose healthcheck and for `kubectl exec` in the
-# README demos. Its version is not pinned: Debian removes old package versions
-# from its mirrors, so a pin breaks the build the day a security update lands.
+# Debian's security updates first. The base image is rebuilt only every few
+# weeks, so between rebuilds its own packages (openssl, zlib, apt...) lag
+# behind fixes Debian has already shipped, and the image scan fails on them.
+# Then curl, for the Compose healthcheck and for `kubectl exec` in the README
+# demos. Its version is not pinned: Debian removes old package versions from
+# its mirrors, so a pin breaks the build the day a security update lands.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

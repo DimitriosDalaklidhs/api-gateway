@@ -2,10 +2,11 @@ FROM python:3.12.14-slim
 
 WORKDIR /app
 
-# curl is for the healthcheck and for switching failure mode with `kubectl exec`.
-# Not pinned, for the reason given in Dockerfile.
+# Security updates, then curl for the healthcheck and for switching failure
+# mode with `kubectl exec`. Both for the reasons given in Dockerfile.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

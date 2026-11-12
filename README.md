@@ -455,7 +455,9 @@ rules (taken out of their ConfigMap first), and `terraform fmt` and `validate`.
 Monday, and fails on HIGH or CRITICAL findings that have a fix. It is on a
 schedule because vulnerabilities are published for packages that did not
 change, and outside CI so that it cannot turn the release pipeline red with no
-commit behind it.
+commit behind it. Its first run failed on eight such findings, all in Debian
+packages that came with the Python base image, which is rebuilt only every few
+weeks. The Dockerfiles now install Debian's security updates at build time.
 
 **CD** runs after CI succeeds on a push to `main`, on the exact commit CI tested.
 It builds the gateway and mock images and pushes them to GHCR with a moving tag
