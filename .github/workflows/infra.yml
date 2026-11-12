@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # -strict rejects fields the API does not define and duplicate keys, so a
       # misspelled field fails here, in review, not at `kubectl apply`.
@@ -30,7 +30,7 @@ jobs:
             -strict -summary -kubernetes-version 1.35.0 /k8s
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12.14"
 
@@ -56,7 +56,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Pinned to a commit: a tag on someone else's repository can be moved
       - name: Set up Terraform

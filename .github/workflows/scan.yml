@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build the gateway image
         run: docker build -t gateway:scan -f gateway/Dockerfile gateway/
