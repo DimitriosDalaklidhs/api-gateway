@@ -761,6 +761,27 @@ class TestConfig:
         from core.config import Settings
         assert Settings(logging={"file": None}).logging.file is None
 
+    def test_without_a_jwt_key_each_process_gets_a_random_one(self):
+        # A key committed to the repository would let anyone sign tokens
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JWT_SECRET_KEY", None)
+            first, second = load_settings().jwt, load_settings().jwt
+        assert first.key_was_generated and second.key_was_generated
+        assert len(first.secret_key) == 64
+        assert first.secret_key != second.secret_key
+
+    def test_jwt_key_comes_from_the_environment(self):
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": "k" * 40}):
+            jwt_cfg = load_settings().jwt
+        assert jwt_cfg.secret_key == "k" * 40
+        assert not jwt_cfg.key_was_generated
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Redis Client Tests

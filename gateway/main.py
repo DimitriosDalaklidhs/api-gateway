@@ -46,6 +46,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Redis unavailable at startup — some features degraded", extra={"error": str(exc)})
 
+    if settings.jwt.key_was_generated:
+        logger.warning(
+            "JWT_SECRET_KEY is not set: signing tokens with a random key. They stop "
+            "working when this process restarts and are rejected by other replicas."
+        )
+
     yield
 
     logger.info("Gateway shutting down")

@@ -61,7 +61,8 @@ routes:
     auth_required: false
 
 jwt:
-  secret_key: "super-secret-change-in-production"
+  # No secret_key here: it comes from JWT_SECRET_KEY. Without one, the gateway
+  # signs with a random key that lasts until it restarts.
   algorithm: "HS256"
   expire_minutes: 60
 

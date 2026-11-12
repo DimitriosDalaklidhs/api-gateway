@@ -58,7 +58,6 @@ data:
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
         auth_required: false
     jwt:
-      secret_key: "PLACEHOLDER-overridden-by-JWT_SECRET_KEY-env"
       algorithm: "HS256"
       expire_minutes: 60
     logging:

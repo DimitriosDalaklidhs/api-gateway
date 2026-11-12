@@ -4,12 +4,13 @@ Loads from YAML file and environment variables.
 """
 
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 class RedisConfig(BaseModel):
@@ -63,9 +64,26 @@ class RouteConfig(BaseModel):
 
 
 class JWTConfig(BaseModel):
-    secret_key: str = "change-me"
+    # Set through JWT_SECRET_KEY (a Secret under Kubernetes), never in a file
+    # in the repository: a key anyone can read lets anyone sign tokens
+    secret_key: str | None = None
     algorithm: str = "HS256"
     expire_minutes: int = 60
+
+    _key_was_generated: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _random_key_if_unset(self) -> "JWTConfig":
+        # Without a key, sign with a random one: tokens then last only as long
+        # as this process and work only on this replica. main.py logs a warning.
+        if not self.secret_key:
+            self.secret_key = secrets.token_hex(32)
+            self._key_was_generated = True
+        return self
+
+    @property
+    def key_was_generated(self) -> bool:
+        return self._key_was_generated
 
 
 class LoggingConfig(BaseModel):

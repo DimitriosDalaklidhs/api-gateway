@@ -89,7 +89,7 @@ flowchart LR
     ├── services/              # proxy + retry, rate limiter, circuit breaker, cache, auth
     ├── routers/               # proxy catch-all, admin API, /metrics
     ├── utils/                 # Logging middleware (request ID, latency), error responses
-    └── tests/test_gateway.py  # 69 unit + integration tests
+    └── tests/test_gateway.py  # 71 unit + integration tests
 ```
 
 ## Quick start
@@ -345,7 +345,7 @@ circuit_breaker:
 |---|---|
 | `REDIS_HOST`, `REDIS_PORT` | Redis address |
 | `REDIS_PASSWORD` | Redis password (a Secret under Kubernetes) |
-| `JWT_SECRET_KEY` | JWT signing key (a Secret under Kubernetes); at least 32 bytes for HS256 |
+| `JWT_SECRET_KEY` | JWT signing key (a Secret under Kubernetes); at least 32 bytes for HS256. Unset, the gateway signs with a random key that lasts until it restarts, and logs a warning |
 
 Two things that break routes silently:
 
@@ -414,14 +414,14 @@ collapse `/users/../orders` to `/orders` on the way upstream.
 ```bash
 cd gateway
 pip install -r requirements-dev.txt
-pytest tests/ -v   # 67 passed, 2 skipped
+pytest tests/ -v   # 69 passed, 2 skipped
 ```
 
 Most tests fake Redis in memory, so no infrastructure is needed. Two tests run
 the Lua script and the circuit breaker against a real Redis, because a fake
 can't run Lua or expire keys. They're skipped unless one is reachable: CI
 provides one, and locally `REDIS_HOST=localhost` with Redis running brings the
-count to 69.
+count to 71.
 
 Coverage: rate limiter (per-route limits and the default, block, ban and unban,
 reset, `Retry-After`, fail-open), every breaker transition including recovery
