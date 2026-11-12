@@ -89,7 +89,7 @@ flowchart LR
     ├── services/              # proxy + retry, rate limiter, circuit breaker, cache, auth
     ├── routers/               # proxy catch-all, admin API, /metrics
     ├── utils/                 # Logging middleware (request ID, latency), error responses
-    └── tests/test_gateway.py  # 71 unit + integration tests
+    └── tests/test_gateway.py  # 74 unit + integration tests
 ```
 
 ## Quick start
@@ -382,7 +382,7 @@ curl -X POST http://localhost:8000/admin/circuit-breakers/reset
 curl -X POST http://localhost:8000/admin/circuit-breakers/http%3A%2F%2Fmock-service%3A8010/reset  # one target
 curl http://localhost:8000/admin/rate-limit/1.2.3.4                    # counters per route, ban status
 curl -X POST http://localhost:8000/admin/rate-limit/1.2.3.4/reset      # clear its counters on every route
-curl -X POST "http://localhost:8000/admin/rate-limit/1.2.3.4/ban?duration=600"
+curl -X POST "http://localhost:8000/admin/rate-limit/1.2.3.4/ban?duration=600"   # seconds, up to 30 days
 curl -X DELETE http://localhost:8000/admin/rate-limit/1.2.3.4/ban      # lift the ban early
 curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=/users*"
 curl -X POST "http://localhost:8000/admin/cache/invalidate?pattern=*"  # everything
@@ -396,7 +396,7 @@ Response headers:
 
 | Header | Meaning |
 |---|---|
-| `X-Request-ID` | The client's ID if it sent one, else a new UUID; forwarded downstream and logged |
+| `X-Request-ID` | The client's ID if it sent one of up to 128 letters, digits and `._:-`, else a new UUID; forwarded downstream and logged |
 | `X-RateLimit-Limit` / `X-RateLimit-Remaining` | Limit for this route and requests left in the window |
 | `X-Response-Time-Ms` | Gateway latency |
 | `X-Cache` | `HIT` when served from the cache |
@@ -414,14 +414,14 @@ collapse `/users/../orders` to `/orders` on the way upstream.
 ```bash
 cd gateway
 pip install -r requirements-dev.txt
-pytest tests/ -v   # 69 passed, 2 skipped
+pytest tests/ -v   # 72 passed, 2 skipped
 ```
 
 Most tests fake Redis in memory, so no infrastructure is needed. Two tests run
 the Lua script and the circuit breaker against a real Redis, because a fake
 can't run Lua or expire keys. They're skipped unless one is reachable: CI
 provides one, and locally `REDIS_HOST=localhost` with Redis running brings the
-count to 71.
+count to 74.
 
 Coverage: rate limiter (per-route limits and the default, block, ban and unban,
 reset, `Retry-After`, fail-open), every breaker transition including recovery

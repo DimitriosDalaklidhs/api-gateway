@@ -7,6 +7,7 @@ carries the ID too.
 """
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -19,13 +20,19 @@ from utils.errors import error_response
 
 logger = logging.getLogger("gateway.middleware")
 
+# A client's X-Request-ID is kept only if it looks like an ID. It goes into
+# every log line and to the upstream, so anything longer or stranger is
+# replaced rather than repeated.
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
 # Probe paths to skip verbose logging
 _QUIET_PATHS = {"/admin/live", "/admin/health", "/favicon.ico"}
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        sent = request.headers.get("X-Request-ID", "")
+        request_id = sent if _REQUEST_ID.fullmatch(sent) else str(uuid.uuid4())
         client_ip = self._get_ip(request)
         path = request.url.path
         start = time.perf_counter()

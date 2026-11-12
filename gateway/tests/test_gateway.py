@@ -567,6 +567,22 @@ class TestProxy:
         assert resp.headers["content-length"] == str(len(body))
 
     @pytest.mark.asyncio
+    async def test_keeps_the_encoding_header_of_a_body_httpx_could_not_decode(self):
+        # An upstream that ignores Accept-Encoding and answers in br: httpx
+        # passes the bytes through compressed, so the label must stay on them
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        compressed = b"\x8b\x02\x80not-really-brotli\x03"
+        upstream = HttpxResponse(200, content=compressed, headers={"content-encoding": "br"})
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        with patch("httpx.AsyncClient.request", new=AsyncMock(return_value=upstream)):
+            resp = await proxy.forward(_mock_request(), "br")
+        assert resp.body == compressed
+        assert resp.headers["content-encoding"] == "br"
+        assert resp.headers["content-length"] == str(len(compressed))
+
+    @pytest.mark.asyncio
     async def test_forwards_the_path_as_sent(self):
         # Decoding "%2F" and "%3F" and re-encoding them would turn them into a
         # real path separator and a query delimiter upstream
@@ -1079,6 +1095,34 @@ class TestIntegration:
         app.dependency_overrides.clear()
 
         assert resp.json()["duration_seconds"] == 42
+
+
+    def test_admin_rate_limit_endpoints_take_ip_addresses_only(self, mock_redis):
+        # A ban on "not-an-ip" used to be stored, and "::0001" would never match
+        # the "::1" the limiter sees
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with TestClient(app) as client:
+            assert client.post("/admin/rate-limit/not-an-ip/ban").status_code == 400
+            assert client.get("/admin/rate-limit/not-an-ip").json() == {"error": "Not an IP address: not-an-ip"}
+            assert client.post("/admin/rate-limit/::0001/ban?duration=60").json()["ip"] == "::1"
+            assert client.get("/admin/rate-limit/::1").json()["banned"] is True
+            assert client.post("/admin/rate-limit/1.2.3.4/ban?duration=999999999").status_code == 422
+        app.dependency_overrides.clear()
+
+    def test_a_request_id_that_does_not_look_like_one_is_replaced(self):
+        # It is logged on every line and sent upstream
+        from main import app
+
+        with TestClient(app) as client:
+            kept = client.get("/admin/live", headers={"X-Request-ID": "abc-123.def:4"})
+            too_long = client.get("/admin/live", headers={"X-Request-ID": "A" * 4000})
+            odd = client.get("/admin/live", headers={"X-Request-ID": "x y"})
+        assert kept.headers["x-request-id"] == "abc-123.def:4"
+        for resp in (too_long, odd):
+            assert len(resp.headers["x-request-id"]) == 36  # a fresh UUID
 
     def test_breakers_are_listed_once_per_target(self, mock_redis):
         # Three routes share mock-service, so they share one breaker

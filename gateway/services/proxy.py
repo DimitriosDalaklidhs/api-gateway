@@ -13,6 +13,7 @@ import httpx
 from core.config import RouteConfig, settings
 from fastapi import Request
 from fastapi.responses import Response
+from httpx._decoders import SUPPORTED_DECODERS  # what httpx decodes, and lists in its Accept-Encoding
 from utils.errors import error_response
 
 from services.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
@@ -31,13 +32,22 @@ _HOP_BY_HOP = frozenset(
 # Request headers the gateway sets itself, replacing whatever the client sent.
 # accept-encoding is here because httpx advertises the encodings it can decode:
 # passing on the client's own list lets the upstream answer in one httpx can't
-# (br, zstd), and that body would reach the client still compressed but, with
-# content-encoding dropped below, no longer labelled as such.
+# (br, zstd), and the client may not accept that encoding.
 _SET_BY_GATEWAY = frozenset({"x-request-id", "x-forwarded-for", "x-gateway", "accept-encoding"})
 
-# httpx hands us the body already decompressed, so the upstream's encoding and
-# length no longer describe it. Starlette recomputes content-length.
-_DECODED_BODY = frozenset({"content-encoding", "content-length"})
+# Starlette sets content-length from the body it is given; the upstream's would
+# be a second, and after decoding a wrong, one.
+_RECOMPUTED = frozenset({"content-length"})
+
+
+def _body_was_decoded(upstream: httpx.Response) -> bool:
+    """
+    Whether httpx removed every content encoding. It skips the ones it can't
+    decode, so a body from an upstream that ignored our Accept-Encoding (say,
+    br) arrives still compressed, and its Content-Encoding has to stay with it.
+    """
+    encodings = upstream.headers.get_list("content-encoding", split_commas=True)
+    return all(e.strip().lower() in SUPPORTED_DECODERS for e in encodings)
 
 # Safe to send twice: repeating them leaves the server in the same state.
 # POST and PATCH are not: a retried POST can create the same order twice.
@@ -105,8 +115,11 @@ def _client_response(upstream: httpx.Response, request_id: str) -> Response:
     response = Response(content=upstream.content, status_code=upstream.status_code)
     # Appended one by one for the same reason: several Set-Cookie headers have
     # to arrive as several headers
+    dropped = _HOP_BY_HOP | _RECOMPUTED
+    if _body_was_decoded(upstream):
+        dropped |= {"content-encoding"}  # it no longer describes the body
     for name, value in upstream.headers.multi_items():
-        if name.lower() not in _HOP_BY_HOP and name.lower() not in _DECODED_BODY:
+        if name.lower() not in dropped:
             response.headers.append(name, value)
     response.headers["x-request-id"] = request_id
     return response

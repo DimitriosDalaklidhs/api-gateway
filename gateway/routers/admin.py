@@ -15,6 +15,7 @@ Admin / observability endpoints.
   POST /auth/token
 """
 
+import ipaddress
 import logging
 import time
 from typing import Any
@@ -169,35 +170,62 @@ async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_re
 # Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/admin/rate-limit/{ip}", tags=["Admin"])
-async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    return await rl.get_stats(ip)
+# A ban longer than this is a typo, not a policy
+_MAX_BAN_SECONDS = 30 * 24 * 3600
 
 
-@router.post("/admin/rate-limit/{ip}/reset", tags=["Admin"])
-async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    rl = RateLimiter(redis)
-    await rl.reset(ip)
-    return {"status": "reset", "ip": ip}
+def _canonical_ip(ip: str) -> str | None:
+    """
+    The address in the form the limiter sees it in, or None if it isn't one.
+    "::0001" and "::1" are the same client; the ban key must match the second,
+    which is how the peer address arrives.
+    """
+    try:
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        return None
 
 
-@router.post("/admin/rate-limit/{ip}/ban", tags=["Admin"])
+def _not_an_ip(ip: str) -> JSONResponse:
+    return error_response(400, f"Not an IP address: {ip}")
+
+
+@router.get("/admin/rate-limit/{ip}", tags=["Admin"], response_model=None)
+async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    return await RateLimiter(redis).get_stats(addr)
+
+
+@router.post("/admin/rate-limit/{ip}/reset", tags=["Admin"], response_model=None)
+async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    await RateLimiter(redis).reset(addr)
+    return {"status": "reset", "ip": addr}
+
+
+@router.post("/admin/rate-limit/{ip}/ban", tags=["Admin"], response_model=None)
 async def ban_ip(
     ip: str,
-    duration: int | None = Query(None, ge=1, description="Seconds. Defaults to rate_limiting.ban_duration_seconds."),
+    duration: int | None = Query(
+        None, ge=1, le=_MAX_BAN_SECONDS,
+        description="Seconds, up to 30 days. Defaults to rate_limiting.ban_duration_seconds.",
+    ),
     redis: aioredis.Redis = Depends(get_redis),
-) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    used = await rl.ban(ip, duration)
-    return {"status": "banned", "ip": ip, "duration_seconds": used}
+) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    used = await RateLimiter(redis).ban(addr, duration)
+    return {"status": "banned", "ip": addr, "duration_seconds": used}
 
 
-@router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"])
-async def unban_ip(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    was_banned = await rl.unban(ip)
-    return {"status": "unbanned" if was_banned else "not banned", "ip": ip}
+@router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"], response_model=None)
+async def unban_ip(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    was_banned = await RateLimiter(redis).unban(addr)
+    return {"status": "unbanned" if was_banned else "not banned", "ip": addr}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
