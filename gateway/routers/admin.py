@@ -1,5 +1,6 @@
 """
 Admin / observability endpoints.
+  GET  /admin/live
   GET  /admin/health
   GET  /admin/metrics
   GET  /admin/routes
@@ -14,6 +15,7 @@ Admin / observability endpoints.
   POST /auth/token
 """
 
+import ipaddress
 import logging
 import time
 from typing import Any
@@ -21,17 +23,25 @@ from typing import Any
 import redis.asyncio as aioredis
 from core.config import settings
 from core.redis_client import get_redis
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from models.schemas import TokenRequest, TokenResponse
 from services.auth import create_token
 from services.cache import CacheService
-from services.circuit_breaker import CircuitBreakerRegistry
+from services.circuit_breaker import CircuitBreaker
 from services.rate_limiter import RateLimiter
+from utils.errors import error_response
 
 logger = logging.getLogger("gateway.router.admin")
 
 router = APIRouter()
 _START_TIME = time.time()
+
+
+def _targets() -> list[str]:
+    """Each downstream once. Breakers are per target, and several routes can share one."""
+    return sorted({route.target for route in settings.routes})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth
@@ -40,8 +50,9 @@ _START_TIME = time.time()
 @router.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
 async def get_token(body: TokenRequest) -> TokenResponse:
     """
-    Issue a JWT. In production, validate credentials against a user store.
-    This demo accepts any username/password.
+    Issue a JWT. Demo only: any username and password are accepted, and the
+    caller picks its own roles. A real deployment would check both against a
+    user store before signing anything.
     """
     token = create_token(
         subject=body.username,
@@ -57,8 +68,22 @@ async def get_token(body: TokenRequest) -> TokenResponse:
 # Health
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/admin/live", tags=["Admin"])
+async def live() -> dict[str, str]:
+    """
+    Liveness. Answers whenever the process can serve a request and touches
+    nothing else: a failed liveness probe restarts the pod, and a restart
+    fixes nothing that is wrong with Redis.
+    """
+    return {"status": "alive"}
+
+
 @router.get("/admin/health", tags=["Admin"])
 async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
+    """
+    Readiness and status. Always 200: the gateway serves traffic without Redis
+    (it fails open), so "degraded" must not take the pod out of rotation.
+    """
     try:
         await redis.ping()
         redis_status = "ok"
@@ -79,11 +104,7 @@ async def health(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
 
 @router.get("/admin/metrics", tags=["Admin"])
 async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    cb_registry = CircuitBreakerRegistry(redis)
-    circuit_statuses = []
-    for route in settings.routes:
-        cb = cb_registry.get(route.target)
-        circuit_statuses.append(await cb.status())
+    circuit_statuses = [await CircuitBreaker(redis, target).status() for target in _targets()]
 
     return {
         "uptime_seconds": round(time.time() - _START_TIME, 1),
@@ -92,7 +113,7 @@ async def metrics(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
                 "path": r.path,
                 "target": r.target,
                 "methods": r.methods,
-                "rate_limit": r.rate_limit,
+                "rate_limit": r.rate_limit if r.rate_limit is not None else settings.rate_limiting.default_limit,
                 "auth_required": r.auth_required,
             }
             for r in settings.routes
@@ -121,31 +142,27 @@ async def list_routes() -> list[dict[str, Any]]:
 
 @router.get("/admin/circuit-breakers", tags=["Admin"])
 async def circuit_breakers(redis: aioredis.Redis = Depends(get_redis)) -> list[dict[str, Any]]:
-    registry = CircuitBreakerRegistry(redis)
-    results = []
-    for route in settings.routes:
-        cb = registry.get(route.target)
-        results.append(await cb.status())
-    return results
+    return [await CircuitBreaker(redis, target).status() for target in _targets()]
 
 
 @router.post("/admin/circuit-breakers/reset", tags=["Admin"])
 async def reset_all_circuits(redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    registry = CircuitBreakerRegistry(redis)
-    for route in settings.routes:
-        cb = registry.get(route.target)
-        await cb.reset()
+    for target in _targets():
+        await CircuitBreaker(redis, target).reset()
     return {"status": "all circuits reset"}
 
 
-@router.post("/admin/circuit-breakers/{service_key:path}/reset", tags=["Admin"])
-async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
+# response_model=None: the return type is a union with a Response, which
+# FastAPI can't turn into a response schema
+@router.post("/admin/circuit-breakers/{service_key:path}/reset", tags=["Admin"], response_model=None)
+async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_redis)) -> JSONResponse | dict[str, str]:
     # service_key is the URL-encoded target. The server decodes %2F to "/"
     # before routing, so it needs the :path converter: a plain {service_key}
     # can't contain slashes, and every target URL has them.
-    registry = CircuitBreakerRegistry(redis)
-    cb = registry.get(service_key)
-    await cb.reset()
+    if service_key not in _targets():
+        # Resetting writes a state key, so an unknown name would leave one behind
+        return error_response(404, "No route uses that target")
+    await CircuitBreaker(redis, service_key).reset()
     return {"status": "reset", "service": service_key}
 
 
@@ -153,35 +170,62 @@ async def reset_circuit(service_key: str, redis: aioredis.Redis = Depends(get_re
 # Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/admin/rate-limit/{ip}", tags=["Admin"])
-async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    return await rl.get_stats(ip)
+# A ban longer than this is a typo, not a policy
+_MAX_BAN_SECONDS = 30 * 24 * 3600
 
 
-@router.post("/admin/rate-limit/{ip}/reset", tags=["Admin"])
-async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str]:
-    rl = RateLimiter(redis)
-    await rl.reset(ip)
-    return {"status": "reset", "ip": ip}
+def _canonical_ip(ip: str) -> str | None:
+    """
+    The address in the form the limiter sees it in, or None if it isn't one.
+    "::0001" and "::1" are the same client; the ban key must match the second,
+    which is how the peer address arrives.
+    """
+    try:
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        return None
 
 
-@router.post("/admin/rate-limit/{ip}/ban", tags=["Admin"])
+def _not_an_ip(ip: str) -> JSONResponse:
+    return error_response(400, f"Not an IP address: {ip}")
+
+
+@router.get("/admin/rate-limit/{ip}", tags=["Admin"], response_model=None)
+async def rate_limit_stats(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    return await RateLimiter(redis).get_stats(addr)
+
+
+@router.post("/admin/rate-limit/{ip}/reset", tags=["Admin"], response_model=None)
+async def rate_limit_reset(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, str] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    await RateLimiter(redis).reset(addr)
+    return {"status": "reset", "ip": addr}
+
+
+@router.post("/admin/rate-limit/{ip}/ban", tags=["Admin"], response_model=None)
 async def ban_ip(
     ip: str,
-    duration: int = 300,
+    duration: int | None = Query(
+        None, ge=1, le=_MAX_BAN_SECONDS,
+        description="Seconds, up to 30 days. Defaults to rate_limiting.ban_duration_seconds.",
+    ),
     redis: aioredis.Redis = Depends(get_redis),
-) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    await rl.ban(ip, duration)
-    return {"status": "banned", "ip": ip, "duration_seconds": duration}
+) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    used = await RateLimiter(redis).ban(addr, duration)
+    return {"status": "banned", "ip": addr, "duration_seconds": used}
 
 
-@router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"])
-async def unban_ip(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any]:
-    rl = RateLimiter(redis)
-    was_banned = await rl.unban(ip)
-    return {"status": "unbanned" if was_banned else "not banned", "ip": ip}
+@router.delete("/admin/rate-limit/{ip}/ban", tags=["Admin"], response_model=None)
+async def unban_ip(ip: str, redis: aioredis.Redis = Depends(get_redis)) -> dict[str, Any] | JSONResponse:
+    if (addr := _canonical_ip(ip)) is None:
+        return _not_an_ip(ip)
+    was_banned = await RateLimiter(redis).unban(addr)
+    return {"status": "unbanned" if was_banned else "not banned", "ip": addr}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

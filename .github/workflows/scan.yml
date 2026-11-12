@@ -1,0 +1,45 @@
+name: Image scan
+
+# Looks for known vulnerabilities in the gateway image: its OS packages and its
+# Python dependencies. The mock image has the same base and the same
+# requirements, so this covers it too.
+#
+# It runs on a schedule as well as on changes, because a vulnerability can be
+# published for a package that has not changed. It is kept out of CI for the
+# same reason: CI should not turn red, and block a release, with no commit
+# behind it.
+on:
+  schedule:
+    - cron: "17 5 * * 1"  # Mondays, 05:17 UTC
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Build the gateway image
+        run: docker build -t gateway:scan -f gateway/Dockerfile gateway/
+
+      # Pinned to a commit rather than a tag. In March 2026 the tags of this
+      # action were pointed at malicious code (GHSA-69fq-xp46-6x23); a commit
+      # ID cannot be moved.
+      - name: Scan for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: gateway:scan
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true  # only findings a rebuild or a version bump would clear
+          exit-code: "1"

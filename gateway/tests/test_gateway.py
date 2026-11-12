@@ -16,6 +16,7 @@ import fnmatch
 import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,19 +45,20 @@ def _down_redis():
     return DownRedis()
 
 
-def _mock_request(method: str = "GET"):
+def _mock_request(method: str = "GET", raw_path: str = "/mock/echo", query: str = "", headers: dict | None = None):
     req = MagicMock()
     req.method = method
-    req.url.path = "/mock/echo"
-    req.url.query = ""
-    req.headers = {}
+    req.scope = {"path": unquote(raw_path), "raw_path": raw_path.encode(), "query_string": query.encode()}
+    req.headers = headers or {}
     req.client.host = "127.0.0.1"
     req.body = AsyncMock(return_value=b"")
     return req
 
 
-def _starlette_request(path: str, authorization: str | None = None) -> StarletteRequest:
+def _starlette_request(path: str, authorization: str | None = None, cookie: str | None = None) -> StarletteRequest:
     headers = [(b"authorization", authorization.encode())] if authorization else []
+    if cookie:
+        headers.append((b"cookie", cookie.encode()))
     return StarletteRequest({
         "type": "http", "method": "GET", "scheme": "http", "path": path,
         "query_string": b"", "headers": headers, "server": ("gateway", 8000),
@@ -243,6 +245,28 @@ class TestRateLimiter:
         assert not await rl.unban(ip)  # nothing left to lift
 
     @pytest.mark.asyncio
+    async def test_route_without_a_limit_gets_the_default(self, mock_redis):
+        # RouteConfig used to default rate_limit to 100, so default_limit never applied
+        from core.config import RouteConfig, settings
+        from services.rate_limiter import RateLimiter
+        route = RouteConfig(path="/no-limit", target="http://t")
+        assert route.rate_limit is None
+        with patch.object(settings.rate_limiting, "default_limit", 7):
+            _, _, limit = await RateLimiter(mock_redis).check("11.0.0.7", route.rate_limit, route.path)
+        assert limit == 7
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_the_time_left_in_the_window(self, mock_redis):
+        from core.config import settings
+        from services.rate_limiter import RateLimiter
+        rl = RateLimiter(mock_redis)
+        await rl.check("11.0.0.5", route_limit=1, route="/mock")
+        await mock_redis.expire(rl._key("11.0.0.5", "/mock"), 17)  # the fake doesn't run the script's EXPIRE
+        assert await rl.retry_after("11.0.0.5", "/mock") == 17
+        # No counter (or Redis can't say): the whole window
+        assert await rl.retry_after("11.0.0.6", "/mock") == settings.rate_limiting.window_seconds
+
+    @pytest.mark.asyncio
     async def test_fails_open_when_redis_is_down(self):
         from services.rate_limiter import RateLimiter
         rl = RateLimiter(_down_redis())
@@ -395,13 +419,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         fake_response = HttpxResponse(
             200,
@@ -422,13 +440,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         call_count = 0
 
@@ -454,13 +466,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request()
 
         with patch("httpx.AsyncClient.request", new=AsyncMock(side_effect=httpx.TimeoutException("timeout"))):
             with patch("asyncio.sleep", new=AsyncMock()):
@@ -476,13 +482,7 @@ class TestProxy:
         route = RouteConfig(path="/mock", target="http://localhost:8010")
         proxy = ProxyService(route=route)
 
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.url.path = "/mock/echo"
-        mock_request.url.query = ""
-        mock_request.headers = {"x-forwarded-for": "6.6.6.6"}
-        mock_request.client.host = "127.0.0.1"
-        mock_request.body = AsyncMock(return_value=b"")
+        mock_request = _mock_request(headers={"x-forwarded-for": "6.6.6.6"})
 
         downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
         with patch("httpx.AsyncClient.request", new=downstream):
@@ -566,6 +566,93 @@ class TestProxy:
         assert "content-encoding" not in resp.headers
         assert resp.headers["content-length"] == str(len(body))
 
+    @pytest.mark.asyncio
+    async def test_keeps_the_encoding_header_of_a_body_httpx_could_not_decode(self):
+        # An upstream that ignores Accept-Encoding and answers in br: httpx
+        # passes the bytes through compressed, so the label must stay on them
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        compressed = b"\x8b\x02\x80not-really-brotli\x03"
+        upstream = HttpxResponse(200, content=compressed, headers={"content-encoding": "br"})
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        with patch("httpx.AsyncClient.request", new=AsyncMock(return_value=upstream)):
+            resp = await proxy.forward(_mock_request(), "br")
+        assert resp.body == compressed
+        assert resp.headers["content-encoding"] == "br"
+        assert resp.headers["content-length"] == str(len(compressed))
+
+    @pytest.mark.asyncio
+    async def test_forwards_the_path_as_sent(self):
+        # Decoding "%2F" and "%3F" and re-encoding them would turn them into a
+        # real path separator and a query delimiter upstream
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010", strip_prefix=True))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            await proxy.forward(_mock_request(raw_path="/mock/a%2Fb%3Fc", query="x=%2F1"), "raw-path")
+        assert str(downstream.call_args.kwargs["url"]) == "http://localhost:8010/a%2Fb%3Fc?x=%2F1"
+
+    @pytest.mark.asyncio
+    async def test_encoded_route_prefix_is_refused(self):
+        # "/%6dock" decodes to "/mock" and matches the route, but stripping
+        # five characters from the raw path would cut it in the wrong place
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010", strip_prefix=True))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            resp = await proxy.forward(_mock_request(raw_path="/%6dock/echo"), "encoded-prefix")
+        assert resp.status_code == 400
+        downstream.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_client_accept_encoding_is_not_forwarded(self):
+        # httpx can't decode br here; an upstream that answered in it would
+        # have its body passed on compressed with the header already removed
+        import httpx
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream):
+            await proxy.forward(_mock_request(headers={"accept-encoding": "br", "accept": "text/plain"}), "enc")
+        sent = httpx.Headers(downstream.call_args.kwargs["headers"])
+        assert "accept-encoding" not in sent
+        assert sent["accept"] == "text/plain"
+
+    @pytest.mark.asyncio
+    async def test_repeated_upstream_headers_survive(self):
+        # A dict of headers kept one Set-Cookie and joined the rest into it
+        from core.config import RouteConfig
+        from services.proxy import ProxyService
+
+        upstream = HttpxResponse(200, content=b"{}", headers=[("set-cookie", "a=1"), ("set-cookie", "b=2")])
+        proxy = ProxyService(route=RouteConfig(path="/mock", target="http://localhost:8010"))
+        with patch("httpx.AsyncClient.request", new=AsyncMock(return_value=upstream)):
+            resp = await proxy.forward(_mock_request(), "cookies")
+        assert resp.headers.getlist("set-cookie") == ["a=1", "b=2"]
+
+    @pytest.mark.asyncio
+    async def test_open_circuit_response_hides_the_target(self, mock_redis):
+        # The target is an internal hostname; it belongs in the log, not the body
+        from core.config import RouteConfig
+        from services.circuit_breaker import CircuitBreaker, CircuitState
+        from services.proxy import ProxyService
+
+        target = "http://internal-host:9999"
+        cb = CircuitBreaker(mock_redis, target)
+        await cb._set_state(CircuitState.OPEN)
+        await mock_redis.set(cb._key_opened, str(time.time()))
+        proxy = ProxyService(route=RouteConfig(path="/mock", target=target), circuit_breaker=cb)
+        resp = await proxy.forward(_mock_request(), "open-circuit")
+        assert resp.status_code == 503
+        assert b"internal-host" not in resp.body
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cache Tests
@@ -580,6 +667,41 @@ class TestCache:
         alice_again = _cache_key(_starlette_request("/users/me", "Bearer alice-token"))
         assert alice != bob
         assert alice == alice_again
+        # A cookie identifies a caller as much as an Authorization header does
+        anonymous = _cache_key(_starlette_request("/shop/cart"))
+        with_session = _cache_key(_starlette_request("/shop/cart", cookie="session=alice"))
+        assert anonymous != with_session
+
+    @pytest.mark.asyncio
+    async def test_binary_body_survives_the_cache(self, mock_redis):
+        # Stored as text, a body that wasn't UTF-8 came back corrupted and
+        # longer than its Content-Length
+        from fastapi.responses import Response
+        from services.cache import CacheService
+        cache = CacheService(mock_redis)
+        request = _starlette_request("/public/cache-test-binary")
+        body = bytes(range(256))
+        await cache.set(request, Response(content=body, media_type="image/png"))
+        hit = await cache.get(request)
+        assert hit.body == body
+        assert hit.headers["content-length"] == str(len(body))
+        assert hit.headers["content-type"] == "image/png"
+        assert hit.headers["x-cache"] == "HIT"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("headers", [
+        {"set-cookie": "session=abc"},
+        {"cache-control": "private, max-age=60"},
+        {"cache-control": "no-store"},
+    ])
+    async def test_responses_not_for_sharing_are_not_stored(self, mock_redis, headers):
+        # One visitor's session cookie used to be replayed to the next
+        from fastapi.responses import Response
+        from services.cache import CacheService
+        cache = CacheService(mock_redis)
+        request = _starlette_request(f"/public/cache-test-{uuid.uuid4()}")
+        await cache.set(request, Response(content=b"{}", headers=headers))
+        assert await cache.get(request) is None
 
     @pytest.mark.asyncio
     async def test_invalidate_by_path_pattern(self, mock_redis):
@@ -612,6 +734,113 @@ class TestAuth:
         with pytest.raises(HTTPException) as exc_info:
             decode_token("not.a.valid.token")
         assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "Invalid token"  # the reason stays in the log
+
+    def test_token_without_expiry_is_rejected(self):
+        # PyJWT only checks exp when the claim is present, so it has to be required
+        import jwt
+        from core.config import settings
+        from fastapi import HTTPException
+        from services.auth import decode_token
+        token = jwt.encode({"sub": "alice"}, settings.jwt.secret_key, algorithm=settings.jwt.algorithm)
+        with pytest.raises(HTTPException) as exc_info:
+            decode_token(token)
+        assert exc_info.value.status_code == 401
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestConfig:
+
+    def test_redis_password_comes_from_the_environment(self):
+        # Under Kubernetes it lives in a Secret, not in the ConfigMap
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {"REDIS_PASSWORD": "from-the-secret"}):
+            assert load_settings().redis.password == "from-the-secret"
+
+    def test_redis_password_survives_the_url(self):
+        # Unquoted, the "@" would end the credentials and the rest become the host
+        import redis.asyncio as aioredis
+        from core.config import RedisConfig
+        password = "p@ss:w/rd#1"
+        url = RedisConfig(host="redis", password=password).url
+        parsed = aioredis.ConnectionPool.from_url(url).connection_kwargs
+        assert parsed["password"] == password
+        assert parsed["host"] == "redis"
+
+    def test_log_file_can_be_turned_off(self):
+        # The Kubernetes ConfigMap sets logging.file to null: stdout only
+        from core.config import Settings
+        assert Settings(logging={"file": None}).logging.file is None
+
+    def test_without_a_jwt_key_each_process_gets_a_random_one(self):
+        # A key committed to the repository would let anyone sign tokens
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JWT_SECRET_KEY", None)
+            first, second = load_settings().jwt, load_settings().jwt
+        assert first.key_was_generated and second.key_was_generated
+        assert len(first.secret_key) == 64
+        assert first.secret_key != second.secret_key
+
+    def test_jwt_key_comes_from_the_environment(self):
+        import os
+
+        from core.config import load_settings
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": "k" * 40}):
+            jwt_cfg = load_settings().jwt
+        assert jwt_cfg.secret_key == "k" * 40
+        assert not jwt_cfg.key_was_generated
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Redis Client Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRedisClient:
+
+    @pytest.mark.asyncio
+    async def test_unreachable_redis_is_left_alone_for_the_cooldown(self):
+        # A Redis that hangs made every command wait out its timeout, several
+        # per request. After one failure the rest must fail without waiting.
+        import redis.asyncio as aioredis
+        from core.redis_client import FailFastRedis
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+
+        client = FailFastRedis()  # connects only when a command runs, and none reaches the socket here
+        real_call = AsyncMock(side_effect=[RedisTimeoutError("timed out"), "PONG"])
+        with patch.object(aioredis.Redis, "execute_command", new=real_call):
+            with pytest.raises(RedisTimeoutError):
+                await client.ping()                 # the real attempt, which times out
+            with pytest.raises(RedisConnectionError):
+                await client.ping()                 # cooling down: Redis isn't asked
+            assert real_call.await_count == 1
+            assert client._down_until > time.monotonic()
+
+            client._down_until = 0.0                # the cooldown has passed
+            assert await client.ping() == "PONG"    # tried again, and it's back
+        assert real_call.await_count == 2
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_redis_error_reply_does_not_start_the_cooldown(self):
+        # Redis answered, so it is reachable; only the command was wrong
+        import redis.asyncio as aioredis
+        from core.redis_client import FailFastRedis
+        from redis.exceptions import ResponseError
+
+        client = FailFastRedis()
+        with patch.object(aioredis.Redis, "execute_command", new=AsyncMock(side_effect=ResponseError("WRONGTYPE"))):
+            with pytest.raises(ResponseError):
+                await client.get("some-key")
+        assert client._down_until == 0.0
+        await client.aclose()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,6 +851,25 @@ class TestIntegration:
 
     def setup_method(self):
         pass
+
+    def test_probes_answer_200_when_redis_is_down(self):
+        # Liveness never asks Redis. Readiness does, and reports it, but a
+        # gateway that fails open is still ready: a 5xx here would pull every
+        # pod out of rotation over an outage they can all serve through.
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = _down_redis
+        with TestClient(app) as client:
+            live = client.get("/admin/live")
+            health = client.get("/admin/health")
+        app.dependency_overrides.clear()
+
+        assert live.status_code == 200
+        assert live.json() == {"status": "alive"}
+        assert health.status_code == 200
+        assert health.json()["status"] == "degraded"
+        assert health.json()["redis"] == "unreachable"
 
     def test_health_endpoint(self):
         from core.redis_client import get_redis
@@ -664,8 +912,41 @@ class TestIntegration:
         app.dependency_overrides[get_redis] = override_redis
         with TestClient(app, raise_server_exceptions=False) as client:
             resp = client.get("/nonexistent-path-xyz")
+            quoted = client.get("/a%22b")
         assert resp.status_code == 404
+        # The path goes through the JSON encoder: a quote in it used to break the body
+        assert quoted.json() == {"error": 'No route configured for /a"b'}
         app.dependency_overrides.clear()
+
+    def test_dot_segments_are_refused(self):
+        # /users/../orders would be limited and authorised as /users, then
+        # collapsed to /orders by the HTTP client on its way upstream
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: AsyncMock()
+        downstream = AsyncMock(return_value=HttpxResponse(200, content=b"{}"))
+        with patch("httpx.AsyncClient.request", new=downstream), TestClient(app) as client:
+            resp = client.get("/users/%2e%2e/orders")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 400
+        downstream.assert_not_awaited()
+
+    def test_unhandled_error_keeps_the_request_id(self):
+        # Starlette's own 500 handler runs outside the logging middleware and
+        # used to answer without the ID the log line carries
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: AsyncMock()
+        with patch("routers.proxy._match_route", side_effect=RuntimeError("boom")), TestClient(app) as client:
+            resp = client.get("/mock/users", headers={"X-Request-ID": "trace-500"})
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "Internal gateway error"}
+        assert resp.headers["x-request-id"] == "trace-500"
 
     def test_rate_limiter_ignores_spoofed_forwarded_for(self):
         from core.redis_client import get_redis
@@ -700,6 +981,27 @@ class TestIntegration:
         assert supplied.headers["x-request-id"] == "trace-abc"
         # A generated ID is the same one the client gets back
         assert sent_generated.get_list("x-request-id") == [generated.headers["x-request-id"]]
+
+    def test_cache_hit_keeps_the_gateway_headers(self, mock_redis):
+        # A hit used to return early, without the rate-limit and timing headers
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        upstream = HttpxResponse(200, content=b'{"n":1}', headers={"content-type": "application/json"})
+        downstream = AsyncMock(return_value=upstream)
+        with patch("httpx.AsyncClient.request", new=downstream), TestClient(app) as client:
+            miss = client.get("/mock/cache-headers")
+            hit = client.get("/mock/cache-headers")
+        app.dependency_overrides.clear()
+
+        assert downstream.await_count == 1
+        assert hit.headers["x-cache"] == "HIT"
+        assert hit.json() == {"n": 1}
+        assert "x-response-time-ms" in hit.headers
+        assert hit.headers["x-request-id"] != miss.headers["x-request-id"]
+        # ...and the hit was counted
+        assert int(hit.headers["x-ratelimit-remaining"]) == int(miss.headers["x-ratelimit-remaining"]) - 1
 
     def test_metrics_exposes_http_and_breaker_metrics(self):
         from core.redis_client import get_redis
@@ -780,6 +1082,62 @@ class TestIntegration:
             assert client.delete("/admin/rate-limit/12.0.0.1/ban").json()["status"] == "unbanned"
             assert client.get("/admin/rate-limit/12.0.0.1").json()["banned"] is False
         app.dependency_overrides.clear()
+
+    def test_ban_without_a_duration_uses_the_configured_one(self, mock_redis):
+        # The endpoint's own default of 300 used to shadow ban_duration_seconds
+        from core.config import settings
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with patch.object(settings.rate_limiting, "ban_duration_seconds", 42), TestClient(app) as client:
+            resp = client.post("/admin/rate-limit/12.0.0.2/ban")
+        app.dependency_overrides.clear()
+
+        assert resp.json()["duration_seconds"] == 42
+
+
+    def test_admin_rate_limit_endpoints_take_ip_addresses_only(self, mock_redis):
+        # A ban on "not-an-ip" used to be stored, and "::0001" would never match
+        # the "::1" the limiter sees
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with TestClient(app) as client:
+            assert client.post("/admin/rate-limit/not-an-ip/ban").status_code == 400
+            assert client.get("/admin/rate-limit/not-an-ip").json() == {"error": "Not an IP address: not-an-ip"}
+            assert client.post("/admin/rate-limit/::0001/ban?duration=60").json()["ip"] == "::1"
+            assert client.get("/admin/rate-limit/::1").json()["banned"] is True
+            assert client.post("/admin/rate-limit/1.2.3.4/ban?duration=999999999").status_code == 422
+        app.dependency_overrides.clear()
+
+    def test_a_request_id_that_does_not_look_like_one_is_replaced(self):
+        # It is logged on every line and sent upstream
+        from main import app
+
+        with TestClient(app) as client:
+            kept = client.get("/admin/live", headers={"X-Request-ID": "abc-123.def:4"})
+            too_long = client.get("/admin/live", headers={"X-Request-ID": "A" * 4000})
+            odd = client.get("/admin/live", headers={"X-Request-ID": "x y"})
+        assert kept.headers["x-request-id"] == "abc-123.def:4"
+        for resp in (too_long, odd):
+            assert len(resp.headers["x-request-id"]) == 36  # a fresh UUID
+
+    def test_breakers_are_listed_once_per_target(self, mock_redis):
+        # Three routes share mock-service, so they share one breaker
+        from core.config import settings
+        from core.redis_client import get_redis
+        from main import app
+
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+        with TestClient(app) as client:
+            listed = client.get("/admin/circuit-breakers").json()
+            unknown = client.post("/admin/circuit-breakers/http%3A%2F%2Fno-such-service/reset")
+        app.dependency_overrides.clear()
+
+        assert sorted(b["service"] for b in listed) == sorted({r.target for r in settings.routes})
+        assert unknown.status_code == 404  # a reset writes a key; an unknown name would leave one behind
 
     def test_reset_one_breaker_by_target(self, mock_redis):
         # The target contains slashes; this endpoint used to fall through to a 404

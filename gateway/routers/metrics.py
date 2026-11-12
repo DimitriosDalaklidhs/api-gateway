@@ -15,7 +15,7 @@ from core.config import settings
 from core.redis_client import get_redis
 from fastapi import APIRouter, Depends, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Gauge, generate_latest
-from services.circuit_breaker import CircuitBreakerRegistry, CircuitState
+from services.circuit_breaker import CircuitBreaker, CircuitState
 
 logger = logging.getLogger("gateway.router.metrics")
 
@@ -45,10 +45,14 @@ REDIS_UP = Gauge(
 
 
 async def _refresh_gauges(redis: aioredis.Redis) -> None:
-    registry = CircuitBreakerRegistry(redis)
     try:
+        # One read per downstream; routes that share a target share its breaker
+        statuses = {
+            target: await CircuitBreaker(redis, target).status()
+            for target in {route.target for route in settings.routes}
+        }
         for route in settings.routes:
-            status = await registry.get(route.target).status()
+            status = statuses[route.target]
             labels = {"route": route.path, "target": route.target}
             CIRCUIT_STATE.labels(**labels).set(STATE_VALUE[CircuitState(status["state"])])
             CIRCUIT_FAILURES.labels(**labels).set(status["failures"])

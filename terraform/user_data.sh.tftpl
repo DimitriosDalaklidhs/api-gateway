@@ -34,8 +34,8 @@ rm -rf /tmp/awscli.zip /tmp/aws
 
 # ── ECR login ───────────────────────────────────────────────────────────────
 # Credentials come from the instance profile via IMDS. Nothing is stored here.
-# The token expires after 12 hours, so the CD pipeline re-runs this line before
-# each pull rather than relying on it persisting.
+# The token expires after 12 hours, so whatever deploys here has to run this
+# line again before each pull rather than rely on it persisting.
 aws ecr get-login-password --region ${aws_region} \
   | docker login --username AWS --password-stdin ${ecr_url}
 

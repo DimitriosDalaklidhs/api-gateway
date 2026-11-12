@@ -45,6 +45,9 @@ data:
       scrape_interval: 15s
       evaluation_interval: 15s
 
+    rule_files:
+      - /etc/prometheus/alerts.yml
+
     scrape_configs:
       # Every gateway replica, scraped directly (not through the Service,
       # which would hit a random pod each time). Opt-in via pod annotations.
@@ -79,6 +82,73 @@ data:
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
+
+  # Alert rules. Prometheus evaluates them every 15s and lists them on its
+  # Alerts page. Nothing delivers them anywhere: that takes an Alertmanager
+  # and a place to send to (README, Known limitations).
+  alerts.yml: |
+    groups:
+      - name: gateway
+        rules:
+          # No replica answers a scrape. absent() also covers the case where
+          # every pod is gone and there is no "up" series left to compare.
+          - alert: GatewayDown
+            expr: absent(up{job="gateway"} == 1)
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: No gateway replica is answering scrapes
+
+          - alert: GatewayReplicaDown
+            expr: up{job="gateway"} == 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Gateway replica {{ $labels.pod }} is not answering scrapes"
+
+          # 5xx as a share of all responses. With no traffic this is 0/0, which
+          # is NaN and not greater than anything, so the alert stays quiet.
+          - alert: GatewayHighErrorRate
+            expr: |
+              sum(rate(http_requests_total{job="gateway", status="5xx"}[5m]))
+                / sum(rate(http_requests_total{job="gateway"}[5m])) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: More than 5% of gateway responses have been 5xx for 5 minutes
+
+          - alert: GatewayHighLatency
+            expr: |
+              histogram_quantile(0.95,
+                sum by (le) (rate(http_request_duration_highr_seconds_bucket{job="gateway"}[5m]))) > 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: Gateway p95 latency has been above 1s for 10 minutes
+
+          # 2 means OPEN. Routes to the same target share one breaker, so the
+          # alert is per target, not per route.
+          - alert: CircuitBreakerOpen
+            expr: max by (target) (gateway_circuit_breaker_state{job="gateway"}) == 2
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "The circuit breaker for {{ $labels.target }} has been open for 2 minutes"
+
+          # The gateway keeps serving without Redis, but with no rate limits,
+          # no cache and no breaker.
+          - alert: GatewayRedisUnreachable
+            expr: min(gateway_redis_up{job="gateway"}) == 0
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: A gateway replica cannot reach Redis and is failing open
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -98,9 +168,23 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      securityContext:
+        # The image runs as "nobody", but by name, and runAsNonRoot can only
+        # verify a number. 65534 is that user.
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: prometheus
           image: prom/prometheus:v3.14.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true    # the TSDB is in the emptyDir at /prometheus
+            capabilities:
+              drop: ["ALL"]
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus

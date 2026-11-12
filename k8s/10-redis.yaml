@@ -1,7 +1,8 @@
 # ── Redis: PVC + Deployment + Service ────────────────────────────────────────
-# NOTE: your compose runs redis with `--save ""` (persistence OFF). That is
-# arguably correct for a rate-limiter/cache. Here it is ON (appendonly) so the
-# PVC actually does something. See README "The Redis persistence question".
+# Compose runs Redis with persistence off (`--save ""`), which is all rate-limit
+# counters and a cache need. Here AOF is on so the PVC has something to hold;
+# losing the data costs one window and a cold cache (README, Kubernetes design
+# notes).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -36,26 +37,75 @@ spec:
       labels:
         app: redis
     spec:
+      # Redis never calls the Kubernetes API, so it gets no token for it
+      automountServiceAccountToken: false
+      securityContext:
+        # The image starts as root only to chown /data and then drops to its
+        # redis user, UID 999. Starting as that user needs neither step.
+        runAsNonRoot: true
+        runAsUser: 999
+        # The image's redis group. Storage that hands over a root-owned volume
+        # makes it writable for this GID; k3s's local-path volumes are
+        # world-writable already.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["redis-server", "--appendonly", "yes", "--loglevel", "warning"]
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --loglevel
+            - warning
+            # Kubernetes fills in $(REDIS_PASSWORD) from the env entry below
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            # Under the 256Mi limit, with room for an AOF rewrite. Without a
+            # cap Redis grows until the kernel kills the container.
+            - --maxmemory
+            - 192mb
+            # When full, evict the least recently used key that has an expiry:
+            # cache entries and counters. Breaker state has none, so memory
+            # pressure can't close an open breaker.
+            - --maxmemory-policy
+            - volatile-lru
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secret
+                  key: REDIS_PASSWORD
+            # redis-cli reads this, so the probes below authenticate
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secret
+                  key: REDIS_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true    # everything Redis writes goes to /data
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: redis
               containerPort: 6379
           volumeMounts:
             - name: data
               mountPath: /data
+          # -e makes redis-cli exit non-zero on an error reply. Without it a
+          # ping that Redis refuses with NOAUTH still exits 0 and passes.
           readinessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              command: ["redis-cli", "-e", "ping"]
             initialDelaySeconds: 3
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 5
           livenessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              command: ["redis-cli", "-e", "ping"]
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3

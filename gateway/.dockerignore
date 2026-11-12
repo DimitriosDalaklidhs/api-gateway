@@ -1,0 +1,20 @@
+# Both images are built from this directory (COPY . . in Dockerfile). Without
+# this file a local build also copies in the virtualenv, old logs and a .env.
+.venv/
+.env
+# ** so they match in every package directory, not only at the top
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+logs/
+
+# Tests and their tooling are not part of what runs
+tests/
+pytest.ini
+requirements-dev.txt
+
+# Build and repo files
+Dockerfile*
+docker-compose.yml
+.dockerignore
+.gitignore

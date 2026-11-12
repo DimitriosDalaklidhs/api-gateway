@@ -1,5 +1,5 @@
 """
-Phase 5 — Circuit Breaker (Redis-backed).
+Circuit breaker (Redis-backed).
 
 States:
   CLOSED    → normal traffic flows through
@@ -222,18 +222,3 @@ class CircuitBreaker:
             "opened_at": float(opened_at_str) if opened_at_str else None,
         }
 
-
-class CircuitBreakerRegistry:
-    """Lazily creates one CircuitBreaker per service key."""
-
-    def __init__(self, redis: aioredis.Redis) -> None:
-        self._redis = redis
-        self._breakers: dict[str, CircuitBreaker] = {}
-
-    def get(self, service: str) -> CircuitBreaker:
-        if service not in self._breakers:
-            self._breakers[service] = CircuitBreaker(self._redis, service)
-        return self._breakers[service]
-
-    def all_services(self) -> list[str]:
-        return list(self._breakers.keys())

@@ -1,10 +1,16 @@
 name: CI
 
+# Everything here has to pass before CD publishes an image: the tests, and the
+# images themselves building and starting the way the cluster runs them.
 on:
   push:
     branches: ["main", "dev"]
   pull_request:
     branches: ["main"]
+
+# Nothing in this workflow writes to the repository or the registry
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -24,16 +30,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12.14"  # same as the python:3.12.14-slim image
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r gateway/requirements.txt
+        run: pip install -r gateway/requirements-dev.txt
 
       - name: Lint with ruff
         run: |
@@ -44,7 +50,34 @@ jobs:
         env:
           REDIS_HOST: localhost
           REDIS_PORT: 6379
-          JWT_SECRET_KEY: ci-test-secret
+          JWT_SECRET_KEY: ci-test-secret-not-used-anywhere-else  # 32+ bytes, as HS256 expects
         run: |
           cd gateway
-          PYTHONPATH=. pytest tests/ -v --asyncio-mode=auto
+          pytest tests/ -v
+
+  images:
+    name: Build & run the images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Lint the Dockerfiles
+        run: |
+          for file in gateway/Dockerfile gateway/Dockerfile.mock; do
+            docker run --rm -i ghcr.io/hadolint/hadolint:v2.15.1 < "$file"
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.14"
+
+      # Builds both images, then runs Redis, the mock and the gateway under the
+      # pod constraints from k8s/ (UID, read-only filesystem, no capabilities)
+      # and sends a request through all three.
+      - name: Build the images and run them as the pods do
+        run: |
+          pip install pyyaml==6.0.2  # the script reads the gateway's config out of its ConfigMap
+          scripts/smoke-test.sh

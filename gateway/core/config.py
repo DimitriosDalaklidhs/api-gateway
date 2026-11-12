@@ -4,11 +4,13 @@ Loads from YAML file and environment variables.
 """
 
 import os
+import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 class RedisConfig(BaseModel):
@@ -20,7 +22,9 @@ class RedisConfig(BaseModel):
     @property
     def url(self) -> str:
         if self.password:
-            return f"redis://:{self.password}@{self.host}:{self.port}/{self.db}"
+            # Quoted, because a password may contain "@", ":" or "/", and any
+            # of them would end the credentials part of the URL early
+            return f"redis://:{quote(self.password, safe='')}@{self.host}:{self.port}/{self.db}"
         return f"redis://{self.host}:{self.port}/{self.db}"
 
 
@@ -51,21 +55,42 @@ class ProxyConfig(BaseModel):
 class RouteConfig(BaseModel):
     path: str
     target: str
-    rate_limit: int = 100
+    # None means rate_limiting.default_limit. A number as the default here
+    # would shadow that setting for every route.
+    rate_limit: int | None = None
     strip_prefix: bool = False
     methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH"]
     auth_required: bool = False
 
 
 class JWTConfig(BaseModel):
-    secret_key: str = "change-me"
+    # Set through JWT_SECRET_KEY (a Secret under Kubernetes), never in a file
+    # in the repository: a key anyone can read lets anyone sign tokens
+    secret_key: str | None = None
     algorithm: str = "HS256"
     expire_minutes: int = 60
+
+    _key_was_generated: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _random_key_if_unset(self) -> "JWTConfig":
+        # Without a key, sign with a random one: tokens then last only as long
+        # as this process and work only on this replica. main.py logs a warning.
+        if not self.secret_key:
+            self.secret_key = secrets.token_hex(32)
+            self._key_was_generated = True
+        return self
+
+    @property
+    def key_was_generated(self) -> bool:
+        return self._key_was_generated
 
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
-    file: str = "logs/gateway.log"
+    # null logs to stdout only, which is what a container wants: the runtime
+    # collects stdout, and the root filesystem can stay read-only
+    file: str | None = "logs/gateway.log"
     max_bytes: int = 10_485_760
     backup_count: int = 5
 
@@ -97,11 +122,6 @@ class Settings(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     caching: CachingConfig = Field(default_factory=CachingConfig)
 
-    @property
-    def route_map(self) -> dict[str, RouteConfig]:
-        """Fast lookup: path prefix → RouteConfig."""
-        return {r.path: r for r in self.routes}
-
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
@@ -120,6 +140,8 @@ def load_settings(config_path: str = "config.yaml") -> Settings:
         data.setdefault("redis", {})["host"] = redis_host
     if redis_port := os.getenv("REDIS_PORT"):
         data.setdefault("redis", {})["port"] = int(redis_port)
+    if redis_password := os.getenv("REDIS_PASSWORD"):
+        data.setdefault("redis", {})["password"] = redis_password
     if jwt_secret := os.getenv("JWT_SECRET_KEY"):
         data.setdefault("jwt", {})["secret_key"] = jwt_secret
 

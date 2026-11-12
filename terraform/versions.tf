@@ -1,8 +1,8 @@
 terraform {
   # Pinned for the same reason the base image and ruff are pinned: a minor
   # release of either the CLI or the provider can change behaviour with no
-  # commit behind it. ~> 1.16 allows 1.16.x only.
-  required_version = "~> 1.16"
+  # commit behind it. ~> 1.16.0 allows 1.16.x only (~> 1.16 would allow 1.17).
+  required_version = "~> 1.16.0"
 
   required_providers {
     aws = {
@@ -12,8 +12,9 @@ terraform {
   }
 
   # State is local. For anything with more than one operator, move it to an S3
-  # backend with DynamoDB locking — two concurrent applies against a local
-  # state file will corrupt it.
+  # backend with state locking (use_lockfile below, S3's own lock file; no
+  # DynamoDB table needed). Two concurrent applies against a local state file
+  # will corrupt it.
   #
   # backend "s3" {
   #   bucket       = "..."

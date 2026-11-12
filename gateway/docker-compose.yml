@@ -7,7 +7,9 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      # Loopback only. This Redis has no password, and a port published
+      # without an address is open on every interface of the host.
+      - "127.0.0.1:6379:6379"
     command: redis-server --save "" --loglevel warning
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -26,10 +28,13 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      JWT_SECRET_KEY: "change-me-in-production-please"
+      # Development placeholder. HS256 wants a key of at least 32 bytes.
+      JWT_SECRET_KEY: "dev-only-secret-change-me-in-production"
     volumes:
+      # Logs: `docker compose logs -f gateway`. The log file stays inside the
+      # container; the image runs unprivileged and could not write to a host
+      # directory that Docker creates as root.
       - ./config.yaml:/app/config.yaml:ro
-      - ./logs:/app/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -46,7 +51,8 @@ services:
       dockerfile: Dockerfile.mock
     restart: unless-stopped
     ports:
-      - "8010:8010"
+      # Loopback only: other machines reach the mock through the gateway
+      - "127.0.0.1:8010:8010"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8010/health"]
       interval: 10s

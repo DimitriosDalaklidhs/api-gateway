@@ -72,10 +72,10 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 # Container registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-# MUTABLE because the CD pipeline overwrites the :gateway and :mock tags on
-# every push. That is convenient and it is also how a tag stops meaning one
-# specific image — the same failure mode as the floating python:3.12-slim tag.
-# IMMUTABLE plus a commit-SHA tag is the stricter option.
+# MUTABLE because the pipeline this was written for overwrote the :gateway and
+# :mock tags on every push. That is convenient and it is also how a tag stops
+# meaning one specific image — the same failure mode as the floating
+# python:3.12-slim tag. IMMUTABLE plus a commit-SHA tag is the stricter option.
 resource "aws_ecr_repository" "this" {
   name                 = var.project_name
   image_tag_mutability = "MUTABLE"

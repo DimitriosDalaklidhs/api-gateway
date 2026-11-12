@@ -1,6 +1,6 @@
 """
 Structured logging configuration.
-Outputs JSON logs to stdout + rotating file.
+Outputs JSON logs to stdout, and to a rotating file when logging.file is set.
 
 Importing this module installs the handlers (main.py does that). Every record
 logged while a request is in flight gets that request's ID, including records
@@ -10,7 +10,6 @@ from the services that never see the request object.
 import json
 import logging
 import logging.handlers
-import time
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -71,10 +70,6 @@ def setup_logging() -> logging.Logger:
     log_cfg = settings.logging
     log_level = getattr(logging, log_cfg.level.upper(), logging.INFO)
 
-    # Ensure log directory exists
-    log_path = Path(log_cfg.file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
     root = logging.getLogger()
     root.setLevel(log_level)
 
@@ -89,15 +84,17 @@ def setup_logging() -> logging.Logger:
     console.addFilter(request_ids)
     root.addHandler(console)
 
-    # Rotating file handler
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_cfg.file,
-        maxBytes=log_cfg.max_bytes,
-        backupCount=log_cfg.backup_count,
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.addFilter(request_ids)
-    root.addHandler(file_handler)
+    # Rotating file handler, unless the config turns it off (logging.file: null)
+    if log_cfg.file:
+        Path(log_cfg.file).parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_cfg.file,
+            maxBytes=log_cfg.max_bytes,
+            backupCount=log_cfg.backup_count,
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(request_ids)
+        root.addHandler(file_handler)
 
     # Quieten noisy third-party loggers
     for noisy in ("httpx", "httpcore", "uvicorn.access"):
@@ -108,48 +105,3 @@ def setup_logging() -> logging.Logger:
 
 logger = setup_logging()
 
-
-class RequestLogger:
-    """Helper to log a request / response cycle."""
-
-    @staticmethod
-    def log_request(
-        method: str,
-        path: str,
-        client_ip: str,
-        request_id: str,
-    ) -> float:
-        start = time.perf_counter()
-        logger.info(
-            "→ request",
-            extra={
-                "request_id": request_id,
-                "method": method,
-                "path": path,
-                "client_ip": client_ip,
-            },
-        )
-        return start
-
-    @staticmethod
-    def log_response(
-        method: str,
-        path: str,
-        status_code: int,
-        latency_ms: float,
-        request_id: str,
-        target: str = "",
-    ) -> None:
-        level = logging.WARNING if status_code >= 400 else logging.INFO
-        logger.log(
-            level,
-            "← response",
-            extra={
-                "request_id": request_id,
-                "method": method,
-                "path": path,
-                "status_code": status_code,
-                "latency_ms": round(latency_ms, 2),
-                "target": target,
-            },
-        )

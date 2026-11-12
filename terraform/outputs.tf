@@ -24,7 +24,7 @@ output "ssh_command" {
 }
 
 output "ecr_repository_url" {
-  description = "Set this as the ECR_URI GitHub Actions secret."
+  description = "Registry the instance pulls from. A pipeline deploying here would push to it."
   value       = aws_ecr_repository.this.repository_url
 }
 

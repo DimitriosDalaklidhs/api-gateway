@@ -58,27 +58,21 @@ data:
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
         auth_required: false
     jwt:
-      secret_key: "PLACEHOLDER-overridden-by-JWT_SECRET_KEY-env"
       algorithm: "HS256"
       expire_minutes: 60
     logging:
       level: "INFO"
-      file: "logs/gateway.log"
-      max_bytes: 10485760
-      backup_count: 5
+      # stdout only. `kubectl logs` reads it, the node rotates it, and the
+      # container's filesystem can be read-only.
+      file: null
     caching:
       enabled: true
       default_ttl_seconds: 60
       cacheable_methods: ["GET"]
       cache_prefix: "cache:"
----
+# The Secret is not in this repository. The gateway and Redis expect one named
+# gateway-secret with the keys JWT_SECRET_KEY and REDIS_PASSWORD; create it on
+# the cluster before applying these manifests (README, "First deploy").
+#
 # A Secret is base64, NOT encryption. Anyone with get-secret RBAC reads it.
 # Real clusters: Sealed Secrets, External Secrets Operator, or a cloud KMS.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: gateway-secret
-  namespace: gateway
-type: Opaque
-stringData:
-  JWT_SECRET_KEY: "change-me-in-production-please"

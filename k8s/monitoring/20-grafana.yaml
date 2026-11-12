@@ -55,9 +55,23 @@ spec:
       labels:
         app: grafana
     spec:
+      # Grafana never calls the Kubernetes API, so it gets no token for it
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472                  # the grafana user in the official image
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: grafana
           image: grafana/grafana:13.2.3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true    # it writes to its data directory and /tmp, both mounted below
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 3000
@@ -102,6 +116,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/grafana
+            - name: tmp
+              mountPath: /tmp
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
               readOnly: true
@@ -114,6 +130,8 @@ spec:
       volumes:
         - name: data
           emptyDir: {}   # dashboards and datasource are provisioned, so nothing important lives here
+        - name: tmp
+          emptyDir: {}
         - name: datasources
           configMap:
             name: grafana-datasources

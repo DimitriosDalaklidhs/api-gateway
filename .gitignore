@@ -6,7 +6,7 @@ __pycache__/
 logs/
 .pytest_cache/
 *.egg-info/
-.envgit
+.env
 # Terraform
 .terraform/
 *.tfstate

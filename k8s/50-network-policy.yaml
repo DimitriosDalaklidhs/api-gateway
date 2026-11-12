@@ -1,0 +1,82 @@
+# ── Network policies: who may connect to what in this namespace ─────────────
+# Without any, every pod in the cluster can open a connection to Redis and to
+# the mock service directly, which makes the gateway in front of them optional.
+#
+# k3s enforces these with its built-in policy controller. Two things are never
+# blocked by a NetworkPolicy: traffic from the pod's own node (so the kubelet's
+# probes keep working) and `kubectl port-forward`, which enters through the
+# kubelet rather than the pod network.
+
+# Start from "nothing gets in", then open one door per workload below.
+# An empty podSelector selects every pod in the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: gateway
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# The gateway is the front door: its HTTP port is open to the whole cluster.
+# That covers the Prometheus scrape from the monitoring namespace and, once
+# there is one, the ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-allow-http
+  namespace: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:              # no "from": any source
+        - protocol: TCP
+          port: 8000
+---
+# Redis takes connections from gateway pods and nothing else
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-gateway
+  namespace: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# So does the mock service: its routes are only reachable through the gateway,
+# with the gateway's limits, auth and breaker in the way
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mock-service-allow-gateway
+  namespace: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: mock-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8010

@@ -1,10 +1,13 @@
 """
-Phase 2 — Request/Response logging middleware.
+Request/response logging middleware.
 
-Logs: method, path, status, latency, client IP, request ID.
+Logs: method, path, status, latency, client IP, request ID. Also assigns the
+request ID and answers any error the routes let escape, so that response
+carries the ID too.
 """
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -12,28 +15,31 @@ from collections.abc import Callable
 from core.logging import request_id_var
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+
+from utils.errors import error_response
 
 logger = logging.getLogger("gateway.middleware")
 
-# Admin / health paths to skip verbose logging
-_QUIET_PATHS = {"/admin/health", "/favicon.ico"}
+# A client's X-Request-ID is kept only if it looks like an ID. It goes into
+# every log line and to the upstream, so anything longer or stranger is
+# replaced rather than repeated.
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+# Probe paths to skip verbose logging
+_QUIET_PATHS = {"/admin/live", "/admin/health", "/favicon.ico"}
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
-
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        sent = request.headers.get("X-Request-ID", "")
+        request_id = sent if _REQUEST_ID.fullmatch(sent) else str(uuid.uuid4())
         client_ip = self._get_ip(request)
         path = request.url.path
         start = time.perf_counter()
 
-        # Attach request_id for use in downstream handlers
+        # The proxy router reads both, so logs, downstream and response agree
         request.state.request_id = request_id
         request.state.client_ip = client_ip
-        request.state.start_time = start
 
         # Every log line written while this request is in flight carries its ID
         token = request_id_var.set(request_id)
@@ -71,7 +77,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         try:
             response: Response = await call_next(request)
         except Exception:
-            latency_ms = (time.perf_counter() - start) * 1000
+            # Answered here, not re-raised. Starlette's last-resort handler sits
+            # outside this middleware, so its 500 would reach the client without
+            # the request ID that the log line for this failure carries.
             logger.error(
                 "Unhandled exception",
                 exc_info=True,
@@ -80,11 +88,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
-                    "latency_ms": round(latency_ms, 2),
                     "client_ip": client_ip,
                 },
             )
-            raise
+            response = error_response(500, "Internal gateway error")
 
         latency_ms = (time.perf_counter() - start) * 1000
 

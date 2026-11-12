@@ -1,19 +1,8 @@
 """
-API Gateway — entry point.
+API Gateway: application entry point.
 
-Phases implemented:
-  1  Basic Proxy (GET/POST/PUT/DELETE/PATCH + dynamic routing)
-  2  Logging Middleware (JSON structured logs → file + stdout)
-  3  Rate Limiting (Redis fixed-window counter per client IP and route)
-  4  Retries (httpx, exponential backoff, configurable status codes)
-  5  Circuit Breaker (CLOSED/OPEN/HALF-OPEN, Redis state)
-  6  Config System (YAML + env-var overrides)
-Bonus:
-  ✅ JWT Authentication
-  ✅ Request Caching (Redis)
-  ✅ /admin/metrics endpoint
-  ✅ Prometheus /metrics (HTTP metrics + circuit breaker gauges)
-  ✅ Admin control plane (ban IPs, reset circuits, invalidate cache)
+Builds the FastAPI app, wires the middleware and the routers, and owns the
+Redis connection for the lifetime of the process.
 """
 
 import logging
@@ -30,6 +19,7 @@ from redis.exceptions import RedisError
 from routers.admin import router as admin_router
 from routers.metrics import router as metrics_router
 from routers.proxy import router as proxy_router
+from utils.errors import error_response
 from utils.middleware import LoggingMiddleware
 
 logger = logging.getLogger("gateway")
@@ -56,6 +46,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Redis unavailable at startup — some features degraded", extra={"error": str(exc)})
 
+    if settings.jwt.key_was_generated:
+        logger.warning(
+            "JWT_SECRET_KEY is not set: signing tokens with a random key. They stop "
+            "working when this process restarts and are rejected by other replicas."
+        )
+
     yield
 
     logger.info("Gateway shutting down")
@@ -69,28 +65,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.gateway.title,
     version=settings.gateway.version,
-    description="""
-## High-Performance API Gateway
-
-Built with **FastAPI** + **httpx** + **Redis**.
-
-### Features
-| Feature | Status |
-|---|---|
-| Dynamic proxy routing | ✅ |
-| Rate limiting (Redis) | ✅ |
-| Retry with backoff | ✅ |
-| Circuit breaker | ✅ |
-| JWT authentication | ✅ |
-| Response caching | ✅ |
-| Structured JSON logging | ✅ |
-| Admin control plane | ✅ |
-
-### Quick Start
-1. `POST /auth/token` with `{"username":"x","password":"y"}` to get a JWT
-2. Use the token as `Authorization: Bearer <token>` on protected routes
-3. Watch `/admin/metrics` for live circuit breaker and route stats
-    """,
+    description=(
+        "Reverse-proxy API gateway: path routing, per-route rate limits, retries, "
+        "a circuit breaker per downstream, a response cache and JWT checks. "
+        "The endpoints listed here are the gateway's own; everything else is proxied."
+    ),
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -112,7 +91,7 @@ app.add_middleware(LoggingMiddleware)
 
 # HTTP metrics (request count, latency, sizes) for Prometheus, served at /metrics.
 # Probes and scrapes are excluded so they don't drown out real traffic.
-Instrumentator(excluded_handlers=["/metrics", "/admin/health"]).instrument(app)
+Instrumentator(excluded_handlers=["/metrics", "/admin/health", "/admin/live"]).instrument(app)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Routers — admin and metrics first so they are NOT caught by the proxy wildcard
@@ -132,20 +111,20 @@ async def redis_unavailable_handler(request: Request, exc: RedisError) -> JSONRe
     # The proxy path fails open on Redis errors; this catches what's left
     # (admin endpoints that read or write Redis state).
     logger.error("Redis unavailable", extra={"path": request.url.path, "error": str(exc)})
-    return JSONResponse(status_code=503, content={"error": "Gateway state store unavailable"})
+    return error_response(503, "Gateway state store unavailable")
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Backstop only. LoggingMiddleware answers errors raised inside it, because
+    # this handler runs outside every middleware: a response built here carries
+    # no request ID and no CORS headers.
     logger.error(
         "Unhandled exception",
         exc_info=True,
         extra={"path": request.url.path},
     )
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal gateway error"},
-    )
+    return error_response(500, "Internal gateway error")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

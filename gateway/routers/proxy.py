@@ -12,9 +12,10 @@ from core.redis_client import get_redis
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from services.auth import require_auth
 from services.cache import CacheService
-from services.circuit_breaker import CircuitBreakerRegistry
+from services.circuit_breaker import CircuitBreaker
 from services.proxy import ProxyService
 from services.rate_limiter import RateLimiter
+from utils.errors import error_response
 
 logger = logging.getLogger("gateway.router.proxy")
 
@@ -23,17 +24,19 @@ router = APIRouter()
 
 def _match_route(path: str) -> RouteConfig | None:
     """
-    Longest-prefix match.
-    e.g. /users/123 matches the /users route.
+    Longest-prefix match on whole segments.
+    e.g. /users/123 matches the /users route; /usersX does not.
     """
     best: RouteConfig | None = None
-    best_len = -1
     for route in settings.routes:
-        if path == route.path or path.startswith(route.path + "/") or path.startswith(route.path + "?"):
-            if len(route.path) > best_len:
+        if path == route.path or path.startswith(route.path + "/"):
+            if best is None or len(route.path) > len(best.path):
                 best = route
-                best_len = len(route.path)
     return best
+
+
+def _has_dot_segment(path: str) -> bool:
+    return any(segment in (".", "..") for segment in path.split("/"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,79 +58,64 @@ async def gateway_proxy(
     client_ip = request.state.client_ip
     start = time.perf_counter()
 
+    # The server has percent-decoded this already, so "%2e%2e" arrives as ".."
+    path = request.scope["path"]
+
+    # ── Path hygiene ────────────────────────────────────────────────────
+    # A route's limit, methods and auth are chosen from the path as sent, but
+    # an HTTP client collapses "/users/../orders" to "/orders" before sending
+    # it upstream. Refused here, or one route's policy guards another's resource.
+    if _has_dot_segment(path):
+        return error_response(400, "Path must not contain '.' or '..' segments")
+
     # ── Route matching ──────────────────────────────────────────────────
-    route = _match_route(request.url.path)
+    route = _match_route(path)
     if not route:
-        return Response(
-            content=f'{{"error": "No route configured for {request.url.path}"}}',
-            status_code=404,
-            media_type="application/json",
-        )
+        return error_response(404, f"No route configured for {path}")
 
     # ── Method check ────────────────────────────────────────────────────
     if request.method not in route.methods:
-        return Response(
-            content=f'{{"error": "Method {request.method} not allowed on {route.path}"}}',
-            status_code=405,
-            media_type="application/json",
-        )
+        return error_response(405, f"Method {request.method} not allowed on {route.path}")
 
     # ── Auth ─────────────────────────────────────────────────────────────
     if route.auth_required:
         try:
             await require_auth(request)
         except HTTPException as exc:
-            return Response(
-                content=f'{{"error": "{exc.detail}"}}',
-                status_code=exc.status_code,
-                media_type="application/json",
-                headers=exc.headers or {},
-            )
+            return error_response(exc.status_code, exc.detail, headers=exc.headers)
 
     # ── Rate limiting ───────────────────────────────────────────────────
     rl = RateLimiter(redis)
     if await rl.is_banned(client_ip):
-        return Response(
-            content='{"error": "IP temporarily banned"}',
-            status_code=429,
-            media_type="application/json",
-        )
+        return error_response(429, "IP temporarily banned")
 
     # Keyed on the route prefix (e.g. "/users"), not the request path, so
     # /users/1 and /users/2 share the /users limit
     allowed, count, limit = await rl.check(client_ip, route.rate_limit, route.path)
     if not allowed:
-        return Response(
-            content=f'{{"error": "Rate limit exceeded ({count}/{limit})","retry_after": {settings.rate_limiting.window_seconds}}}',
-            status_code=429,
-            media_type="application/json",
+        retry_after = await rl.retry_after(client_ip, route.path)
+        return error_response(
+            429,
+            f"Rate limit exceeded ({count}/{limit})",
+            retry_after=retry_after,
             headers={
                 "X-RateLimit-Limit": str(limit),
                 "X-RateLimit-Remaining": "0",
-                "Retry-After": str(settings.rate_limiting.window_seconds),
+                "Retry-After": str(retry_after),
             },
         )
 
-    # ── Cache (GET only) ────────────────────────────────────────────────
+    # ── Cache, then the upstream ────────────────────────────────────────
     cache = CacheService(redis)
-    cached = await cache.get(request)
-    if cached is not None:
-        cached.headers["X-Request-ID"] = request_id
-        return cached
-
-    # ── Circuit breaker ─────────────────────────────────────────────────
-    cb_registry = CircuitBreakerRegistry(redis)
-    cb = cb_registry.get(route.target)
-
-    # ── Proxy ───────────────────────────────────────────────────────────
-    proxy = ProxyService(route=route, circuit_breaker=cb)
-    response = await proxy.forward(request, request_id)
-
-    # ── Cache successful GET responses ──────────────────────────────────
-    if request.method == "GET" and response.status_code < 400:
+    response = await cache.get(request)
+    if response is None:
+        proxy = ProxyService(route=route, circuit_breaker=CircuitBreaker(redis, route.target))
+        response = await proxy.forward(request, request_id)
+        # CacheService decides whether the method, status and headers allow it
         await cache.set(request, response)
 
     # ── Response headers ────────────────────────────────────────────────
+    # The same on a cache hit as on a miss: a hit counts against the limit too
     remaining = await rl.remaining(client_ip, route.rate_limit, route.path)
     response.headers["X-RateLimit-Limit"] = str(limit)
     response.headers["X-RateLimit-Remaining"] = str(remaining)

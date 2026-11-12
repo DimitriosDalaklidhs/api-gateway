@@ -1,0 +1,76 @@
+name: Infra checks
+
+# Validates what CI's tests never load: the Kubernetes manifests, the
+# Prometheus config inside them, and the Terraform. Separate from CI because a
+# mistake here does not make an image unfit to publish.
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # -strict rejects fields the API does not define and duplicate keys, so a
+      # misspelled field fails here, in review, not at `kubectl apply`.
+      # Keep -kubernetes-version at or below the version the cluster runs.
+      - name: Validate against the Kubernetes API schemas
+        run: |
+          docker run --rm -v "$PWD/k8s:/k8s:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
+            -strict -summary -kubernetes-version 1.35.0 /k8s
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.14"
+
+      # prometheus.yml and alerts.yml are entries in a ConfigMap, so they are
+      # pulled out first. promtool comes from the image the cluster runs, and
+      # "check config" also checks every rule file the config names.
+      - name: Check the Prometheus config and alert rules
+        run: |
+          pip install pyyaml==6.0.2
+          mkdir prometheus
+          for file in prometheus.yml alerts.yml; do
+            python scripts/configmap_file.py k8s/monitoring/10-prometheus.yaml prometheus-config "$file" > "prometheus/$file"
+          done
+          docker run --rm --entrypoint /bin/promtool -v "$PWD/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.14.0 check config /etc/prometheus/prometheus.yml
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Pinned to a commit: a tag on someone else's repository can be moved
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: "1.16.7"  # versions.tf allows 1.16.x
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff
+
+      # No backend and no credentials. init only downloads the provider that
+      # .terraform.lock.hcl names; validate checks the configuration against it.
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
